@@ -87,6 +87,15 @@ ehm = [
 optuna = [
     "optuna",
 ]
+aduulm = [
+    "scikit-fuzzy",
+    "scikit-learn",
+    "tikzplotlib",
+    "tabulate",
+    "matplotlib==3.5.1",
+    "numpy==1.26.4",
+    "webcolors==1.11.1"
+]
 
 [tool.setuptools]
 include-package-data = false
