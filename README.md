@@ -1,3 +1,62 @@
+# Self-Assessment and Monitoring Module for Tracking Algorithms: Implementation in the Stone Soup Framework
+
+This repository contains the implementation of self-assessment extensions for the Stone Soup framework. 
+These extensions are part of our research, as described in our paper submitted to the FUSION 2025 conference.
+
+## Overview
+
+Our proposal introduces a Self-Assessment (SA) module, referred to as Self-Assessor, into the Stone Soup framework.
+
+(Insert figure illustrating the conceptual architecture of the Self-Assessor)
+
+## Citation
+If you find this repository useful in your research, please consider citing our work.   
+*[The BibTeX entry will be updated upon acceptance of our FUSION 2025 paper.]* 
+
+```
+@misc{aduulmstonesoup2025,
+    title={Self-Assessment and Monitoring Module for Tracking Algorithms: Implementation in the Stone Soup Framework},
+    author={Griebel, Thomas and Buchholz, Michael and Dietmayer, Klaus},
+    howpublished = {\url{https://github.com/uulm-mrm/aduulm-stonesoup}},
+    year={2025}
+}
+```
+
+The following publications are included in the self-assessment framework:
+
+* [Kalman Filter Meets Subjective Logic: A Self-Assessing Kalman Filter Using Subjective Logic](https://doi.org/10.23919/FUSION45008.2020.9190520)
+* [Self-Assessment for Single-Object Tracking in Clutter Using Subjective Logic](https://doi.org/10.23919/FUSION49751.2022.9841294)
+* [Online Performance Assessment of Multi-Sensor Kalman Filters Based on Subjective Logic](https://doi.org/10.23919/FUSION52260.2023.10224188)
+
+## Installation & Development Setup
+
+To start developing with our self-assessment extensions, please use Python 3.12 and clone the appropriate branch:
+
+```
+git clone "https://github.com/uulm-mrm/aduulm-stonesoup.git"
+cd Stone-Soup
+python -m pip install -e ".[dev,aduulm]"
+```
+
+Make sure to check out our self-assessment extensions branch:
+[selfassessment_extensions](https://github.com/uulm-mrm/aduulm-stonesoup/tree/selfassessment_extensions)
+
+## Tutorials & Usage
+
+If you want to experiment with the Self-Assessor, tutorials can be found here:
+
+👉 [Self-Assessor Tutorials](https://github.com/uulm-mrm/aduulm-stonesoup/tree/selfassessment_extensions/aduulm_scripts/tutorials)
+
+These tutorials allow you to:
+
+ - Disturb and manipulate ground truth trajectories
+ - Disturb and manipulate measurements
+ - Obtain self-assessment results to detect disturbances
+
+(Insert figures illustrating trajectory disturbances, manipulated measurements, and assessment results)
+
+--- here begins the original Stone Soup readme ---
+
 <h1><img valign="middle" alt="Stone Soup Logo" src="https://raw.githubusercontent.com/dstl/Stone-Soup/main/docs/source/_static/stone_soup_logo.svg" height="100"> Stone Soup</h1>
 
 [![PyPI](https://img.shields.io/pypi/v/stonesoup?style=flat)](https://pypi.org/project/stonesoup)
