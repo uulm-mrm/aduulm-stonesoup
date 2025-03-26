@@ -7,7 +7,7 @@ These extensions are part of our research, as described in our paper submitted t
 
 Our proposal introduces a Self-Assessment (SA) module, referred to as Self-Assessor, into the Stone Soup framework.
 
-(Insert figure illustrating the conceptual architecture of the Self-Assessor)
+<img src="aduulm_scripts/images/concept-selfassessor-stonesoup.png" width="600">
 
 ## Citation
 If you find this repository useful in your research, please consider citing our work.   
@@ -53,9 +53,22 @@ These tutorials allow you to:
  - Disturb and manipulate measurements
  - Obtain self-assessment results to detect disturbances
 
-(Insert figures illustrating trajectory disturbances, manipulated measurements, and assessment results)
+### Disturbance in Transition Model
+<img src="aduulm_scripts/images/disturbance-transition-model.png" width="600">
 
---- here begins the original Stone Soup readme ---
+### Disturbance in Measurement Model
+<img src="aduulm_scripts/images/disturbance-measurement-model.png" width="600">
+
+### Self-Assessment: Kalman Self-Assessor and Single-Time Step NIS
+<img src="aduulm_scripts/images/selfassessor_kalman_and_nis_single.png" width="600">
+
+### Self-Assessment: Kalman Self-Assessor and Time-Averaged NIS
+<img src="aduulm_scripts/images/selfassessor_kalman_and_nis_averaged.png" width="600">
+
+
+--- Here begins the original Stone Soup README ---
+
+The following section contains the unmodified README from the original Stone Soup project.
 
 <h1><img valign="middle" alt="Stone Soup Logo" src="https://raw.githubusercontent.com/dstl/Stone-Soup/main/docs/source/_static/stone_soup_logo.svg" height="100"> Stone Soup</h1>
 
