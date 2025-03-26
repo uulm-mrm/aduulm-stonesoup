@@ -11,7 +11,7 @@ Our proposal introduces a Self-Assessment (SA) module, referred to as Self-Asses
 
 ## Citation
 If you find this repository useful in your research, please consider citing our work.   
-*[The BibTeX entry will be updated upon acceptance of our FUSION 2025 paper.]* 
+*[The BibTeX entry will be updated if our FUSION 2025 paper is accepted.]* 
 
 ```
 @misc{aduulmstonesoup2025,
@@ -52,6 +52,8 @@ These tutorials allow you to:
  - Disturb and manipulate ground truth trajectories
  - Disturb and manipulate measurements
  - Obtain self-assessment results to detect disturbances
+
+Please note that we are still in the process of refactoring and finalizing the code. Additional tutorials and corresponding self-assessor implementations will be uploaded shortly.
 
 ### Disturbance in Transition Model
 <img src="aduulm_scripts/images/disturbance-transition-model.png" width="600">
