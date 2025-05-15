@@ -31,7 +31,7 @@ The following publications are included in the self-assessment framework:
 * [Self-Assessment for Single-Object Tracking in Clutter Using Subjective Logic](https://doi.org/10.23919/FUSION49751.2022.9841294)
 * [Online Performance Assessment of Multi-Sensor Kalman Filters Based on Subjective Logic](https://doi.org/10.23919/FUSION52260.2023.10224188)
 
-## Installation & Development Setup
+## 🛠️ Installation & Development Setup
 
 To start developing with our self-assessment extensions, please use Python 3.12 and clone the appropriate branch:
 
@@ -44,7 +44,7 @@ python -m pip install -e ".[dev,aduulm]"
 Make sure to check out our self-assessment extensions branch:
 [selfassessment_extensions](https://github.com/uulm-mrm/aduulm-stonesoup/tree/selfassessment_extensions)
 
-## Tutorials & Usage
+## 📘 Tutorials & Usage
 
 If you want to experiment with the Self-Assessor, tutorials can be found here:
 
@@ -58,16 +58,16 @@ These tutorials allow you to:
 
 Please note that we are still in the process of refactoring and finalizing the code. Additional tutorials and corresponding self-assessor implementations will be uploaded shortly.
 
-### Disturbance in Transition Model
+### 🔧 Disturbance in Transition Model
 <img src="aduulm_scripts/images/disturbance-transition-model.png" width="600">
 
-### Disturbance in Measurement Model
+### 🔧 Disturbance in Measurement Model
 <img src="aduulm_scripts/images/disturbance-measurement-model.png" width="600">
 
-### Self-Assessment: Kalman Self-Assessor and Single-Time Step NIS
+### 📉 Self-Assessment: Kalman Self-Assessor and Single-Time Step NIS
 <img src="aduulm_scripts/images/selfassessor_kalman_and_nis_single.png" width="600">
 
-### Self-Assessment: Kalman Self-Assessor and Time-Averaged NIS
+### 📉 Self-Assessment: Kalman Self-Assessor and Time-Averaged NIS
 <img src="aduulm_scripts/images/selfassessor_kalman_and_nis_averaged.png" width="600">
 
 
