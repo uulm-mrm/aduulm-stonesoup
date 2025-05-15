@@ -1,17 +1,20 @@
 # Self-Assessment and Monitoring Module for Tracking Algorithms: Implementation in the Stone Soup Framework
 
 This repository contains the implementation of self-assessment extensions for the Stone Soup framework. 
-These extensions are part of our research, as described in our paper submitted to the FUSION 2025 conference.
+These extensions are part of our ongoing research on performance monitoring in tracking systems.
 
-## Overview
+For more technical details, please refer to our upcoming publication.
+
+## 🔍 Overview
 
 Our proposal introduces a Self-Assessment (SA) module, referred to as Self-Assessor, into the Stone Soup framework.
+The module enables tracking algorithms to monitor and evaluate their own performance in real-time, facilitating more reliable decision-making in autonomous systems.
 
 <img src="aduulm_scripts/images/concept-selfassessor-stonesoup.png" width="600">
 
-## Citation
+## 📄 Citation
 If you find this repository useful in your research, please consider citing our work.   
-*[The BibTeX entry will be updated if our FUSION 2025 paper is accepted.]* 
+*[The citation details will be updated once the paper is published.]* 
 
 ```
 @misc{aduulmstonesoup2025,
