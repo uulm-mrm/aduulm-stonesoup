@@ -11,7 +11,7 @@ from stonesoup.selfassessor._threshold import calc_threshold_n_diff as calc_tsh_
 
 
 class KalmanSelfAssessor:
-    """Class for self assessment in Kalman filtering using subjective logic.
+    """Class for self-assessment in Kalman filtering using subjective logic.
 
     Attributes
     ----------
@@ -64,7 +64,8 @@ class KalmanSelfAssessor:
 
     def __init__(self, num_X: int, n_st: int, n_c: int = 1, prob_detect: float = 1, dim_meas: int = 2,
                  threshold_ltst: float = None, alpha_threshold_dc: float = 0.1, sigma_cutoff: float = None,
-                 trust_discount: float = 0.9, type_compar: str = 'dimensional', mapping: List[int] = None):
+                 sigma_cutoff_alpha: float = 0.01, trust_discount: float = 0.99,
+                 type_compar: str = 'dimensional', mapping: List[int] = None):
         """Construct KalmanSelfAssessor object.
 
         Parameters
@@ -77,18 +78,20 @@ class KalmanSelfAssessor:
             Length of window between comparisons between long and short term opinion.
             The default is 1.
         prob_detect : float, optional
-            Probability of detection for each measurement. The default is 0.9.
+            Probability of detection for each measurement. The default is 1.0.
         dim_meas : int, optional
             Number of dimensions of the measurement. The default is 2.
         threshold_ltst : float, optional
             Threshold up to which the degree of conflict between long and short term
-            opinion can go until long term opinion is reset. The default is 0.2.
+            opinion can go until long term opinion is reset.
         alpha_threshold_dc : float, optional
             Alpha used for the confidence for the DC-threshold. The default is 0.1.
         sigma_cutoff : float, optional
-            Distance after which only one bin is considered. The default is 3.
+            Distance after which only one bin is considered.
+        sigma_cutoff_alpha : float, optional
+            Significance level between 0 and 1 which is used for sigma_cutoff calculation.
         trust_discount : float, optional
-            Trust discount probability of long term opinion. The default is 0.9.
+            Trust discount probability of long term opinion. The default is 0.99.
         type_compar : string, optional
             Type on how the Opinion regarding the measurement should be generated.
             'elementwise': each element in the measurement is compared to a one
@@ -125,7 +128,7 @@ class KalmanSelfAssessor:
 
         # storage for auxiliary variables
         if sigma_cutoff is None:
-            sigma_cutoff = np.sqrt(2 * gammaincinv(dim_meas / 2, 1 - alpha_threshold_dc))
+            sigma_cutoff = np.sqrt(2 * gammaincinv(dim_meas / 2, 1 - sigma_cutoff_alpha))
 
         if type_compar == 'elementwise':
             self._X = GaussVariable1D(num_X, sigma_cutoff)
@@ -311,10 +314,11 @@ class KalmanSelfAssessor:
                 the assumptions.
             u_delta : float
                 uncertainty in the above measures.
+            threshold_dc : float
+                DC-threshold above which two opinions are considered different.
 
         """
         # based on the mapping, only certain components are considered in the self-assessment
-
         if self.mapping is not None:
             assert 0 < len(self.mapping) <= len(z_pred), 'WARNING: Invalid mapping specified in init'
             assert np.amax(self.mapping) < len(z_pred), 'WARNING: Invalid mapping specified in init'
@@ -324,7 +328,6 @@ class KalmanSelfAssessor:
                 z = z[self.mapping]
             z_pred = z_pred[self.mapping]
             S_pred = S_pred[tuple([self.mapping])][:, self.mapping]
-
 
         # update short term opinion and generate opinion about measurement
         [self._op_st, self._op_z] = self.update_opinion(z_pred, S_pred, z)
@@ -357,10 +360,10 @@ class KalmanSelfAssessor:
             self._counter_compar += 1
             # if the length for window for comparison is reached and the long term
             # opinion has gathered at least the evidence of the short term opinion
-            if (self._counter_compar >= self.n_c) and (self._counter_lt_op >= self.n_st):
+            if self._counter_compar >= self.n_c and self._counter_lt_op >= self.n_st:
                 self._counter_compar = 0
                 # if degree of conflict between long and short term opinion exceeds
-                # the set threshold
+                # the calculated threshold
                 if sl.dc(self._op_st, self._op_lt) > self.threshold_ltst:
                     # reset long term opinion and the counter of its length
                     self._op_lt = deepcopy(self._op_0)
@@ -376,7 +379,16 @@ class KalmanSelfAssessor:
         # calculate threshold for DC comparison with reference
         self._threshold_dc = calc_tsh(self._op_X, self.alpha_threshold_dc)
 
-    def assess_fusion(self, op_fused):
+    def get_sas_measures_fused_opinion(self, op_fused):
+        """
+        Compute self-assessment measures from a fused subjective logic opinion.
+
+        Parameters
+        ----------
+        op_fused : MultiOpinion
+            The fused subjective logic opinion obtained from combining multiple
+            sensor opinions using a fusion operator.
+        """
         self._delta = sl.dc(op_fused, self._op_G)
         self._u_delta = op_fused.uncertainty
 

@@ -1,16 +1,48 @@
+import warnings
 import numpy as np
+
 
 def disturbance_transition_model(transition_model, gt_configs, k):
     """
-    This function modifies the transition model based on the disturbance modes ('jump', 'drift').
+    Apply disturbance effects ("jump" or "drift") to a ground truth transition model.
 
-    Args:
-        transition_model: The current ground truth transition model (CombinedLinearGaussianTransitionModel).
-        gt_configs: The ground truth configuration.
-        k: The current time step.
+    This function modifies the noise characteristics of the given transition model
+    at runtime based on disturbance configurations. The disturbances can simulate
+    sudden changes ("jump") or gradual changes ("drift") in process noise.
 
-    Returns:
-        Updated transition model with disturbance effects.
+    Parameters
+    ----------
+    transition_model : CombinedLinearGaussianTransitionModel
+        The current ground truth transition model, consisting of a list of sub-models
+        with modifiable `noise_diff_coeff` attributes.
+
+    gt_configs : dict
+        Ground truth disturbance configuration with the following keys:
+        - "disturbance_mode" (list[str]): List of disturbance types per model.
+          Supported values are:
+            * "none" : no disturbance applied
+            * "jump" : sudden change in process noise
+            * "drift" : gradual change in process noise
+        - "parameters" (list[list[tuple]]): Parameters for each disturbance mode.
+          Each entry corresponds to one mode in "disturbance_mode". Examples:
+            * For "jump": [(time_step, multiplier), ...]
+            * For "drift": [(start_step, end_step, drift_factor), ...]
+
+    k : int
+        Current time step.
+
+    Returns
+    -------
+    CombinedLinearGaussianTransitionModel
+        The updated transition model with applied disturbance effects.
+
+    Notes
+    -----
+    - For "jump", at the specified time step, the `noise_diff_coeff` is multiplied
+      by the given multiplier.
+    - For "drift", between `start_step < k <= end_step`, the `noise_diff_coeff`
+      is gradually scaled using the provided drift factor.
+    - Disturbance modes not recognized will trigger a warning.
     """
     for idx_dist_mode, dist_mode in enumerate(gt_configs['disturbance_mode']):
         if dist_mode.lower() == 'none':
@@ -19,39 +51,82 @@ def disturbance_transition_model(transition_model, gt_configs, k):
         elif dist_mode.lower() == 'jump':
             for z in range(len(gt_configs['parameters'][idx_dist_mode])):
                 if k == gt_configs['parameters'][idx_dist_mode][z][0]:
-                    # Apply jump disturbance (modifying noise_diff_coeff and thus covariance matrix)
+                    # Apply jump disturbance
                     for model in transition_model.model_list:
-                        model.noise_diff_coeff = model.noise_diff_coeff * gt_configs['parameters'][idx_dist_mode][z][1]
+                        model.noise_diff_coeff *= gt_configs['parameters'][idx_dist_mode][z][1]
 
         elif dist_mode.lower() == 'drift':
             for z in range(len(gt_configs['parameters'][idx_dist_mode])):
                 if gt_configs['parameters'][idx_dist_mode][z][0] < k <= gt_configs['parameters'][idx_dist_mode][z][1]:
                     dq = gt_configs['parameters'][idx_dist_mode][z][2] - 1
-                    nsteps_drift = gt_configs['parameters'][idx_dist_mode][z][1] - gt_configs['parameters'][idx_dist_mode][z][0]
+                    nsteps_drift = (
+                            gt_configs['parameters'][idx_dist_mode][z][1] -
+                            gt_configs['parameters'][idx_dist_mode][z][0]
+                    )
                     k_drift = k - gt_configs['parameters'][idx_dist_mode][z][0]
 
                     for model in transition_model.model_list:
-                        model.noise_diff_coeff = model.noise_diff_coeff * ((nsteps_drift + k_drift * dq) /
-                                                                    (nsteps_drift + (k_drift - 1) * dq))
+                        model.noise_diff_coeff *= (
+                                (nsteps_drift + k_drift * dq) /
+                                (nsteps_drift + (k_drift - 1) * dq)
+                        )
 
         else:
-            warnings.warn(f"Ground truth disturbance mode {dist_mode} specified in configuration "
-                          f"does not match valid options.")
+            warnings.warn(
+                f"Ground truth disturbance mode '{dist_mode}' in configuration "
+                f"does not match valid options ('none', 'jump', 'drift')."
+            )
 
     return transition_model
 
 
-def disturbance_measurement_model(measurement_model, gt_configs, k):
+def disturbance_measurement_noise(measurement_model, gt_configs, k):
     """
-    Apply disturbances to the measurement model based on the ground truth configuration.
+    Apply disturbances to a measurement model's noise covariance based on a disturbance configuration.
 
-    Args:
-        measurement_model: The measurement model whose noise covariance needs modification.
-        gt: The ground truth disturbance configuration.
-        k: Current time step.
+    This function modifies the measurement model covariance (`noise_covar`)
+    dynamically according to specified disturbance modes such as sudden jumps,
+    gradual drifts, periodic outliers, or randomly varying noise.
 
-    Returns:
+    Parameters
+    ----------
+    measurement_model : MeasurementModel
+        The measurement model whose noise covariance will be modified.
+        Must have a `noise_covar` attribute (numpy array).
+
+    gt_configs : dict
+        Ground truth disturbance configuration with the following keys:
+        - "disturbance_mode" (list[str]): List of disturbance types applied to the model.
+          Supported values are:
+            * "none"        : no disturbance
+            * "jump"        : sudden multiplicative change in covariance
+            * "drift"       : gradual multiplicative change in covariance over time
+            * "outliers"    : periodic spikes in noise covariance
+            * "noisy_noise" : randomly varying covariance
+        - "parameters" (list[list[tuple]]): Parameters for each disturbance mode.
+          Each entry corresponds to one mode in "disturbance_mode". Examples:
+            * For "jump": [(time_step, multiplier), ...]
+            * For "drift": [(start_step, end_step, drift_factor), ...]
+            * For "outliers": [(start_step, end_step, period, multiplier), ...]
+            * For "noisy_noise": [(start_step, end_step, min_factor, max_factor), ...]
+
+    k : int
+        Current time step.
+
+    Returns
+    -------
+    MeasurementModel
         Updated measurement model with disturbances applied.
+
+    Notes
+    -----
+    - Covariance scaling is always multiplicative.
+    - "jump" applies the multiplier squared (`multiplier^2`).
+    - "drift" gradually modifies the covariance between the start and end step.
+    - "outliers" applies periodic spikes (multiplying/dividing by factor).
+    - "noisy_noise" samples a random factor from a uniform distribution.
+    - Invalid disturbance modes trigger a warning.
+
     """
     measurement_model.noise_covar = measurement_model.noise_covar.astype(float)  # Ensure float type
 
@@ -90,6 +165,66 @@ def disturbance_measurement_model(measurement_model, gt_configs, k):
                     measurement_model.noise_covar *= factor
 
         else:
-            warnings.warn(f"Invalid disturbance mode: {dist_mode}")
+            warnings.warn(
+                f"Invalid disturbance mode '{dist_mode}'. "
+                "Valid options: 'none', 'jump', 'drift', 'outliers', 'noisy_noise'."
+            )
 
     return measurement_model
+
+
+def disturbance_prob_det_and_clutter(gt_configs, k, manipulation_value):
+    """
+    Apply disturbances (e.g., 'jump', 'drift') to scalar parameters such as
+    expected clutter rate or probability of detection.
+
+    Parameters
+    ----------
+    gt_configs : dict
+        Ground truth disturbance configuration with the following structure:
+            - 'disturbance_mode' : list of str
+                Disturbance modes, e.g., ['jump', 'drift'].
+            - 'parameters' : list of lists
+                Parameters for each disturbance mode:
+                    * 'jump'  : [(timestep, factor), ...]
+                    * 'drift' : [(start, end, drift_factor), ...]
+    k : int
+        Current time step.
+    manipulation_value : float
+        Current scalar value (e.g., expected clutter rate or probability of detection).
+
+    Returns
+    -------
+    float
+        Updated scalar value after applying disturbances.
+    """
+
+    for idx, mode in enumerate(gt_configs['disturbance_mode']):
+        mode = mode.lower()
+
+        if mode == 'none':
+            continue
+
+        elif mode == 'jump':
+            for timestep, factor in gt_configs['parameters'][idx]:
+                if k == timestep:
+                    manipulation_value *= factor
+
+        elif mode == 'drift':
+            for start, end, drift_factor in gt_configs['parameters'][idx]:
+                if start < k <= end:
+                    # Drift requires recursive scaling since the initial value evolves each step
+                    dq = drift_factor - 1  # incremental factor per step
+                    nsteps_drift = end - start
+                    k_drift = k - start
+                    manipulation_value = pow(
+                        np.sqrt(manipulation_value) *
+                        (nsteps_drift + k_drift * dq) /
+                        (nsteps_drift + (k_drift - 1) * dq),
+                        2
+                    )
+
+        else:
+            warnings.warn(f"Invalid disturbance mode '{mode}' specified. Skipping.")
+
+    return manipulation_value

@@ -594,6 +594,7 @@ def fusion_weighted_belief(w_all):
 
     return w_fused
 
+
 def binomial_multiplication(w_x, w_y):
     """Calculate binomial multiplication of opinions.
 
@@ -640,6 +641,59 @@ def binomial_multiplication(w_x, w_y):
     # create opinion from values
     w_xandy = BiOpinion(b_xay, d_xay, a_xay, u_xay)
     return w_xandy
+
+
+def create_binomial_opinion(w_a, fused_bins=None):
+    """
+    Transform a multinomial opinion into a binomial opinion by fusing selected bins/events.
+
+    Parameters
+    ----------
+    w_a : MultiOpinion
+        Multinomial opinion to be transformed into a binomial opinion.
+    fused_bins : list[int], optional
+        Indices of bins/events to be fused into the new opinion's belief mass.
+        Remaining bins form the disbelief mass.
+        Must not be empty.
+
+    Returns
+    -------
+    BiOpinion
+        Resulting binomial opinion.
+
+    Raises
+    ------
+    ValueError
+        If `fused_bins` is None or empty.
+    """
+    if not fused_bins:
+        raise ValueError("fused_bins must be a non-empty list of indices.")
+
+    belief = 0.0
+    base_rate = 0.0
+    evidence = np.zeros(2)
+
+    # Accumulate base rate and either belief or evidence, depending on certainty
+    for idx in fused_bins:
+        base_rate += w_a.baseRate[idx]
+        if w_a.uncertainty == 0:
+            belief += w_a.belief[idx]
+        else:
+            evidence[0] += w_a.get_evidence()[idx]
+
+    if w_a.uncertainty == 0:
+        # Certainty case: construct directly from belief/disbelief
+        uncertainty = w_a.uncertainty
+        disbelief = 1 - (belief + uncertainty)
+        w_out = BiOpinion(belief, disbelief, base_rate, uncertainty, evidence=False)
+    else:
+        # Uncertainty case: construct from evidence
+        evidence[1] = sum(
+            w_a.get_evidence()[idx] for idx in range(w_a.W) if idx not in fused_bins
+        )
+        w_out = BiOpinion(evidence[0], evidence[1], base_rate, 1, evidence=True)
+
+    return w_out
 
 
 class Opinion(ABC):

@@ -2,6 +2,7 @@ import numpy as np
 import math
 from scipy.stats import norm
 
+
 def calc_threshold_n_diff(n_b, n_s, alpha):
     """Calculates DC-threshold for different opinions.
 
@@ -74,7 +75,8 @@ def calc_threshold_n_diff(n_b, n_s, alpha):
     else:
         return theta[0]
 
-def calc_threshold_op_diff(op_X, alpha, op_G=None):
+
+def calc_threshold_op_diff(op_X, alpha):
     """Calculates DC-threshold for different opinions.
 
     This method uses the similar named method above.

@@ -91,6 +91,7 @@
 #
 # As is customary in Python scripts we begin with some imports. (These ones allow us access to
 # mathematical and timing functions.)
+
 import numpy as np
 from datetime import datetime, timedelta
 
@@ -172,7 +173,7 @@ from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
     'disturbance_mode': ['jump'],
-    'parameters': [[[1100, 10.0], [1300, 0.1]]]
+    'parameters': [[[1100, 16.0], [1300, 0.0625]]]
 }
 process_noise_coeff_memory = [[], []]
 
@@ -269,32 +270,66 @@ measurement_model.matrix()
 measurement_model.covar()
 
 # %%
+# Multi-sensor setup
+from copy import deepcopy
+
+sensors = {"Sensor_01", "Sensor_02", "Sensor_03"}
+measurement_models = {}
+for sensor_name in sensors:
+    measurement_models[sensor_name] = deepcopy(measurement_model)
+
+# %%
 # Generate the measurements
 
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-gt_measurement_configs = {
+disturbed_sensor = {"Sensor_01"}
+gt_measurement_config_disturbed = {
     'disturbance_mode': ['jump', 'drift', 'outliers'],
     'parameters': [[[100, 2], [300, 0.5]], [[400, 500, 2.5], [600, 700, 0.4]], [[800, 1000, 30, 3]]]
 }
-meas_std_dev_memory = []
+gt_measurement_config_normal = {
+    'disturbance_mode': [],
+    'parameters': []
+}
+gt_measurement_configs = {}
+for sensor_name in sensors:
+    if sensor_name in disturbed_sensor:
+        gt_measurement_configs[sensor_name] = deepcopy(gt_measurement_config_disturbed)
+    else:
+        gt_measurement_configs[sensor_name] = deepcopy(gt_measurement_config_normal)
 
-measurements = []
-for k, state in enumerate(truth):
+all_measurements = []
+all_meas_std_dev_memory = []
+measurements_sensor ={}
 
-    # Disturb the measurement model based on the disturbance modes
-    measurement_model = disturbance_measurement_noise(measurement_model, gt_measurement_configs, k)
+for sensor_name in sensors:
+    measurement_model = measurement_models[sensor_name]
+    gt_measurement_config = gt_measurement_configs[sensor_name]
 
-    measurement = measurement_model.function(state, noise=True)
-    measurements.append(Detection(measurement,
-                                  timestamp=state.timestamp,
-                                  measurement_model=measurement_model))
-    meas_std_dev_memory.append(np.sqrt(measurement_model.noise_covar))
+    sensor_measurements = []
+    sensor_meas_std_dev_memory = []
+
+    for k, state in enumerate(truth):
+        # Disturb the measurement model based on the disturbance modes
+        measurement_model = disturbance_measurement_noise(measurement_model, gt_measurement_config, k)
+
+        measurement = measurement_model.function(state, noise=True)
+        sensor_measurements.append(Detection(measurement,
+                                             timestamp=state.timestamp,
+                                             measurement_model=measurement_model))
+        sensor_meas_std_dev_memory.append(np.sqrt(measurement_model.noise_covar))
+
+    # add all measurements and noise parameters of one sensor to the memories
+    measurements_sensor[sensor_name] = sensor_measurements
+    all_measurements.append(sensor_measurements)
+    all_meas_std_dev_memory.append(sensor_meas_std_dev_memory)
 
 # %%
 # Plot the result, again mapping the x and y position values
-plotter.plot_measurements(measurements, [0, 2])
+for sensor_name in sensors:
+    plotter.plot_measurements(measurements_sensor[sensor_name], [0, 2], label=sensor_name)
 plotter.fig
 
 # %%
@@ -343,15 +378,18 @@ from stonesoup.predictor.kalman import KalmanPredictor
 predictor = KalmanPredictor(transition_model)
 
 from stonesoup.updater.kalman import KalmanUpdater
-updater = KalmanUpdater(measurement_model)
+# Multi-sensor updaters
+updaters = {sensor_name: KalmanUpdater(measurement_models[sensor_name]) for sensor_name in sensors}
 
 # %%
-# Construct a Self-Assessor for the Kalman Filter
+# Construct Self-Assessors for the Multi-Sensor Kalman Filter
 # ^^^^^^^^^^^^^^^^^^^^^^^^^
 #
-# We're now ready to construct a self-assessor to monitor the assumptions of the Kalman filter.
+# We're now ready to construct self-assessors to monitor the assumptions of the multi-sensor Kalman filter.
 
 from stonesoup.selfassessor.kalman_selfassessor import KalmanSelfAssessor
+from stonesoup.selfassessor.multisensor_kalman_selfassessor import MultiSensorKalmanSelfAssessor
+
 # Self-assessor settings
 sa_settings = {
     "num_X": 7,
@@ -361,13 +399,25 @@ sa_settings = {
     "alpha_threshold_dc": 0.1,
     "trust_discount": 0.99,
 }
-selfassessor = KalmanSelfAssessor(num_X=sa_settings["num_X"],
-                                  n_st=sa_settings["n_st"],
-                                  n_c=sa_settings["n_c"],
-                                  dim_meas=sa_settings["dim_meas"],
-                                  alpha_threshold_dc=sa_settings["alpha_threshold_dc"],
-                                  trust_discount=sa_settings["trust_discount"])
-selfassessor_measures_history = []
+selfassessors = {sensor_name: KalmanSelfAssessor(num_X=sa_settings["num_X"],
+                                                 n_st=sa_settings["n_st"],
+                                                 n_c=sa_settings["n_c"],
+                                                 dim_meas=sa_settings["dim_meas"],
+                                                 alpha_threshold_dc=sa_settings["alpha_threshold_dc"],
+                                                 trust_discount=sa_settings["trust_discount"])
+                 for sensor_name in sensors}
+selfassessors_measures_histories = {sensor_name: [] for sensor_name in sensors}
+
+# Multi-sensor self-assessor (CBF fusion only)
+multisensor_selfassessor = MultiSensorKalmanSelfAssessor(
+    num_X=sa_settings["num_X"],
+    n_st=sa_settings["n_st"],
+    n_c=sa_settings["n_c"],
+    dim_meas=sa_settings["dim_meas"],
+    alpha_threshold_dc=sa_settings["alpha_threshold_dc"],
+    trust_discount=sa_settings["trust_discount"],
+)
+multisensor_measures_history = []
 
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
@@ -376,13 +426,14 @@ nis_settings = {
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
-nis = NIS(window_length=nis_settings["window_length"],
-          alpha=nis_settings["alpha"],
-          dim=nis_settings["dim_meas"])
-nis_measures_history = []
+nis_assessors = {sens_name: NIS(window_length=nis_settings["window_length"],
+                                alpha=nis_settings["alpha"],
+                                dim=nis_settings["dim_meas"])
+                 for sens_name in sensors}
+nis_measures_histories = {sensor_name: [] for sensor_name in sensors}
 
 # %%
-# Run the Kalman filter
+# Run the multi-sensor Kalman filter with sequential updating procedure
 # ^^^^^^^^^^^^^^^^^^^^^
 # Now we have the components, we can execute the Kalman filter estimator on the simulated data.
 #
@@ -409,21 +460,48 @@ from stonesoup.types.hypothesis import SingleHypothesis
 # do this. Storing the information is facilitated by the top-level :class:`~.Track` class which
 # holds a sequence of states.
 from stonesoup.types.track import Track
+
+prediction_memory = []
+
 track = Track()
-for measurement in measurements:
-    prediction = predictor.predict(prior, timestamp=measurement.timestamp)
-    hypothesis = SingleHypothesis(prediction, measurement)  # Group a prediction and measurement
-    post = updater.update(hypothesis)
-    track.append(post)
-    prior = track[-1]
-    # self-assessment
-    z_p = hypothesis.measurement_prediction.mean
-    S_p = hypothesis.measurement_prediction.covar
-    selfassessor.assess(z_p, S_p, measurement.state_vector)
-    selfassessor_measures = selfassessor.get_sas_measures()
-    nis_measures = nis.assess(z_p, S_p, measurement.state_vector)
-    selfassessor_measures_history.append(selfassessor_measures)
-    nis_measures_history.append(nis_measures)
+# iterate over all time steps
+for i in range(num_steps):
+    # get measurements from all sensors for current time step
+    measurements = [all_measurements[n][i] for n in range(len(sensors))]
+    # prediction
+    prediction = predictor.predict(prior, timestamp=measurements[0].timestamp)
+    prediction_memory.append(prediction)
+
+    state = prediction
+    # loop over all sensor measurements
+    for n, sensor_name in enumerate(sensors):
+        # sequential sensor update
+        hypothesis = SingleHypothesis(state, measurements[n])
+        post = updaters[sensor_name].update(hypothesis)
+        state = post
+
+        # sensor specific self-assessments
+        hypothesis_for_self_assessment = SingleHypothesis(prediction_memory[-1], measurements[n])
+        post_for_self_assessment = updaters[sensor_name].update(hypothesis_for_self_assessment)
+        # self-assessment
+        z_p = hypothesis_for_self_assessment.measurement_prediction.mean
+        S_p = hypothesis_for_self_assessment.measurement_prediction.covar
+
+        selfassessors[sensor_name].assess(z_p, S_p, measurements[n].state_vector)
+        selfassessor_measures = selfassessors[sensor_name].get_sas_measures()
+        selfassessors_measures_histories[sensor_name].append(selfassessor_measures)
+
+        nis_measures = nis_assessors[sensor_name].assess(z_p, S_p, measurements[n].state_vector)
+        nis_measures_histories[sensor_name].append(nis_measures)
+
+    # multi-sensor self-assessment
+    op_all = [selfassessors[sensor_name].get_complete_opinion() for sensor_name in sensors]
+    multisensor_selfassessor.assess(op_all)
+    multisensor_measures = multisensor_selfassessor.get_sas_measures()
+    multisensor_measures_history.append(multisensor_measures)
+
+    track.append(state)
+    prior = state
 
 # %%
 # Plot the resulting track, including uncertainty ellipses
@@ -433,9 +511,12 @@ plotter.show()
 
 # %%
 # Plot the self-assessment measures
-from aduulm_scripts.utils.plotting import plot_selfassessment_with_nis
-plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
-                             assessor_type='KalmanSelfAssessor')
+from aduulm_scripts.utils.plotting import plot_selfassessment_with_nis, plot_multisensor_selfassessment
+for sensor_name in sensors:
+    plot_selfassessment_with_nis(selfassessors_measures_histories[sensor_name], nis_measures_histories[sensor_name],
+                        nis_settings["alpha"], sensor_name=sensor_name, assessor_type='KalmanSelfAssessor')
+
+plot_multisensor_selfassessment(multisensor_measures_history, assessor_type='Multi-Sensor KalmanSelfAssessor')
 
 # %%
 # Key points
@@ -468,5 +549,8 @@ plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history
 # .. [#] T. Griebel, J. Mueller, P. Geisler, C. Hermann, M. Herrmann, M. Buchholz, and K. Dietmayer,
 #        “Self-assessment for single-object tracking in clutter using subjective logic,”
 #        in 2022 25th International Conference on Information Fusion (FUSION). IEEE, 2022.
+# .. [#] T. Griebel, J. Heinzler, M. Buchholz and K. Dietmayer, "Online Performance Assessment
+#        of Multi-Sensor Kalman Filters Based on Subjective Logic," 2023 26th International
+#        Conference on Information Fusion (FUSION), Charleston, SC, USA, 2023, pp. 1-8.
 
 # sphinx_gallery_thumbnail_path = '_static/sphinx_gallery/Tutorial_1.PNG'
