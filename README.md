@@ -56,7 +56,23 @@ These tutorials allow you to:
  - Disturb and manipulate measurements
  - Obtain self-assessment results to detect disturbances
 
-Please note that we are still in the process of refactoring and finalizing the code. Additional tutorials and corresponding self-assessor implementations will be uploaded shortly.
+The currently available self-assessment approaches consist of:
+
+- Linear and nonlinear Kalman filter self-assessor
+  - `01_KalmanFilterTutorialWithSelfAssessment.py`
+  - `02_ExtendedKalmanFilterTutorialWithSelfAssessment.py`  
+  - `03_UnscentedKalmanFilterTutorialWithSelfAssessment.py`  
+
+- Multi-sensor Kalman filter self-assessor 
+  - `01_MultiSensorKalmanFilterTutorialWithSelfAssessment.py`  
+
+- Self-assessor for (multi-sensor) single-object tracking in clutter using nearest neighbour association
+  - `05_DataAssociation-ClutterWithSelfAssessment.py`  
+  - `05_MultiSensorDataAssociation-ClutterWithSelfAssessment.py`  
+
+- Self-assessor for (multi-sensor) single-object tracking in clutter using probabilistic data association
+  - `07_PDATutorialWithSelfAssessment.py`  
+  - `07_MultiSensorPDATutorialWithSelfAssessment.py`
 
 ### 🔧 Disturbance in Transition Model
 <img src="aduulm_scripts/images/disturbance-transition-model.png" width="600">
@@ -70,8 +86,9 @@ Please note that we are still in the process of refactoring and finalizing the c
 ### 📉 Self-Assessment: Kalman Self-Assessor and Time-Averaged NIS
 <img src="aduulm_scripts/images/selfassessor_kalman_and_nis_averaged.png" width="600">
 
+✅ Try out the tutorials and start experimenting with self-assessment for your own tracking setups.
 
---- Here begins the original Stone Soup README ---
+**--- Here begins the original Stone Soup README ---**
 
 The following section contains the unmodified README from the original Stone Soup project.
 
