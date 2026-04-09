@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
-import tikzplotlib
+# import tikzplotlib
 import numpy as np
+from fontTools.unicodedata import block
 
 
 def plot_selfassessment_with_nis(
@@ -101,8 +102,6 @@ def plot_selfassessment_with_nis(
     ax1.grid(True)
     ax1.legend(loc="upper right")
 
-    plt.show()
-
     # Save if requested
     if save_plots:
         if save_folder is None:
@@ -113,9 +112,10 @@ def plot_selfassessment_with_nis(
             base_name = "selfassessor"
 
         fig.savefig(f'{save_folder}/{base_name}.png', bbox_inches='tight')
-        tikzplotlib.save(f'{save_folder}/{base_name}.tex', figure=fig, encoding='utf-8')
+        # tikzplotlib.save(f'{save_folder}/{base_name}.tex', figure=fig, encoding='utf-8')
 
-    plt.close(fig)
+
+    return fig
 
 
 def plot_multisensor_selfassessment(selfassessment_measures,
@@ -170,7 +170,7 @@ def plot_multisensor_selfassessment(selfassessment_measures,
         if save_folder is None:
             raise ValueError("save_folder must be provided if save_plots is True.")
         fig.savefig(f'{save_folder}/multisensor_selfassessor.png', bbox_inches='tight')
-        tikzplotlib.save(f'{save_folder}/multisensor_selfassessor.tex', figure=fig, encoding='utf-8')
+        # tikzplotlib.save(f'{save_folder}/multisensor_selfassessor.tex', figure=fig, encoding='utf-8')
 
     plt.close(fig)
 
@@ -242,8 +242,8 @@ def plot_multiple_selfassessment_measures(measures_dict, assessor_type='', save_
             if save_folder is None:
                 raise ValueError("save_folder must be provided if save_plots is True.")
             fig.savefig(f"{save_folder}/selfassessor_{measure_name}.png", bbox_inches='tight')
-            tikzplotlib.save(f"{save_folder}/selfassessor_{measure_name}.tex",
-                             figure=fig, encoding='utf-8')
+            # tikzplotlib.save(f"{save_folder}/selfassessor_{measure_name}.tex",
+            #                  figure=fig, encoding='utf-8')
 
         plt.close(fig)
 
@@ -321,6 +321,6 @@ def plot_gospa(gospa_metric, folder_name=None, save_name="gospa", average=False,
         if folder_name is None:
             raise ValueError("folder_name must be provided if save_plots is True.")
         fig.savefig(f"{folder_name}/{save_name}.png", bbox_inches='tight')
-        tikzplotlib.save(f"{folder_name}/{save_name}.tex", figure=fig, encoding='utf-8')
+        # tikzplotlib.save(f"{folder_name}/{save_name}.tex", figure=fig, encoding='utf-8')
 
     plt.close(fig)

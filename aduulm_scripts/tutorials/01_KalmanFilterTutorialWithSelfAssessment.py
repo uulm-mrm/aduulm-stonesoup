@@ -6,7 +6,7 @@
 ==========================================================
 """
 
-# %%
+# %% [markdown]
 # This notebook is designed to introduce some of the basic features of Stone Soup using a single
 # target scenario and a Kalman filter as an example.
 #
@@ -82,7 +82,7 @@
 # calculated after a measurement update. We then proceed recursively, the posterior distribution at
 # :math:`k` becoming the prior for the next measurement timestep, and so on.
 
-# %%
+# %% [markdown]
 # A nearly-constant velocity example
 # ----------------------------------
 #
@@ -91,10 +91,41 @@
 #
 # As is customary in Python scripts we begin with some imports. (These ones allow us access to
 # mathematical and timing functions.)
+# %%
 import numpy as np
 from datetime import datetime, timedelta
+import subjective_logic as sl
+from subjective_logic.draw_sl_opinions import *
+import matplotlib.pyplot as plt
+plt.rcParams['text.usetex'] = False
+import matplotlib
+matplotlib.use('TkAgg')
 
-# %%
+
+draw_flags_opinion = {
+    'draw_hypo_texts': True,
+    'draw_axis': False,
+    'draw_axis_label': True,
+    'draw_opinion': True,
+    'draw_opinion_label': True,
+    'draw_prior': False,
+    'draw_prior_label': True,
+    'draw_projection': False,
+    'draw_projection_label': True,
+    'belief_label_position': 0.5,
+    'disbelief_label_position': 0.7,
+    'uncertainty_label_position': 0.7,
+}
+
+op = sl.Opinion(0.4, 0.2)
+sl.create_triangle_plot()
+draw_flags_opinion = {
+    }
+draw_full_opinion_triangle(op, '_X^{B}', None, draw_flags_opinion)
+sl.draw_point(op)
+plt.show()
+
+# %% [markdown]
 # Simulate a target
 # ^^^^^^^^^^^^^^^^^
 #
@@ -107,6 +138,7 @@ from datetime import datetime, timedelta
 # second intervals. We'll do this by employing one of Stone Soup's native transition models.
 #
 # These inputs are required:
+# %%
 from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
 from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel, \
                                                ConstantVelocity
@@ -120,7 +152,7 @@ start_time = datetime.now().replace(microsecond=0)
 
 np.random.seed(1991)
 
-# %%
+# %% [markdown]
 # The :class:`~.ConstantVelocity` class creates a one-dimensional constant velocity model with
 # Gaussian noise. For this simulation :math:`\mathbf{x}_k  = F_k \mathbf{x}_{k-1} + \mathbf{w}_k`,
 # :math:`\mathbf{w}_k \sim \mathcal{N}(0,Q)`, with
@@ -138,7 +170,7 @@ np.random.seed(1991)
 # where :math:`q`, the input parameter to :class:`~.ConstantVelocity`, is the magnitude of the
 # noise per :math:`\triangle t`-sized timestep.
 
-# %%
+# %% [markdown]
 # The :class:`~.CombinedLinearGaussianTransitionModel` class takes a number
 # of 1d models and combines them in a linear Gaussian model of arbitrary dimension, :math:`D`.
 #
@@ -155,6 +187,7 @@ np.random.seed(1991)
 #                        \end{bmatrix}
 #
 # We want a 2d simulation, so we'll do:
+# %%
 q_x = 0.05
 q_y = 0.05
 transition_model = CombinedLinearGaussianTransitionModel([ConstantVelocity(q_x),
@@ -192,7 +225,7 @@ for k in range(1, num_steps + 1):
         transition_model.function(truth[k-1], noise=True, time_interval=timedelta(seconds=1)),
         timestamp=timesteps[k]))
 
-# %%
+# %% [markdown]
 # Thus the ground truth is generated and we can plot the result.
 #
 # Stone Soup has a few in-built plotting classes which can be used to plot
@@ -204,9 +237,9 @@ for k in range(1, num_steps + 1):
 # is set to 0.3. This means that each data point will be on display for 30% of the total
 # simulation time. Also note that the mapping argument is [0, 2] because those are the x and
 # y position indices from our state vector.
-
+# %%
 from stonesoup.plotter import AnimatedPlotterly
-plotter = AnimatedPlotterly(timesteps, tail_length=0.3)
+plotter = AnimatedPlotterly(timesteps, tail_length=0.3, height=1000)
 plotter.plot_ground_truths(truth, [0, 2])
 plotter.fig
 
@@ -218,11 +251,11 @@ transition_model.matrix(time_interval=timedelta(seconds=1))
 # %%
 transition_model.covar(time_interval=timedelta(seconds=1))
 
-# %%
+# %% [markdown]
 # At this point you can play with the various parameters and see how it affects the simulated
 # output.
 
-# %%
+# %% [markdown]
 # Simulate measurements
 # ^^^^^^^^^^^^^^^^^^^^^
 #
@@ -250,10 +283,11 @@ transition_model.covar(time_interval=timedelta(seconds=1))
 from stonesoup.types.detection import Detection
 from stonesoup.models.measurement.linear import LinearGaussian
 
-# %%
+# %% [markdown]
 # The linear Gaussian measurement model is set up by indicating the number of dimensions in the
 # state vector and the dimensions that are measured (so specifying :math:`H_k`) and the noise
 # covariance matrix :math:`R`.
+# %%
 measurement_model = LinearGaussian(
     ndim_state=4,  # Number of state dimensions (position and velocity in 2D)
     mapping=(0, 2),  # Mapping measurement vector index to state index
@@ -297,12 +331,12 @@ for k, state in enumerate(truth):
 plotter.plot_measurements(measurements, [0, 2])
 plotter.fig
 
-# %%
+# %% [markdown]
 # At this stage you should have a moderately linear ground truth path (dotted line) with a series
 # of simulated measurements overplotted (blue circles). Take a moment to fiddle with the numbers in
 # :math:`Q` and :math:`R` to see what it does to the path and measurements.
 
-# %%
+# %% [markdown]
 # Construct a Kalman filter
 # ^^^^^^^^^^^^^^^^^^^^^^^^^
 #
@@ -332,13 +366,14 @@ plotter.fig
 # :math:`\mathbf{z}_k - H_{k}\mathbf{x}_{k|k-1}` is known as the *innovation* and :math:`S_k` the
 # *innovation covariance*; :math:`K_k` is the *Kalman gain*.
 
-# %%
+# %% [markdown]
 # Constructing a predictor and updater in Stone Soup is simple. In a nice division of
 # responsibility, a :class:`~.Predictor` takes a :class:`~.TransitionModel` as input and
 # an :class:`~.Updater` takes a :class:`~.MeasurementModel` as input. Note that for now we're using
 # the same models used to generate the ground truth and the simulated measurements. This won't
 # usually be possible, and it's an interesting exercise to explore what happens when these
 # parameters are mismatched.
+# %%
 from stonesoup.predictor.kalman import KalmanPredictor
 predictor = KalmanPredictor(transition_model)
 
@@ -381,7 +416,7 @@ nis = NIS(window_length=nis_settings["window_length"],
           dim=nis_settings["dim_meas"])
 nis_measures_history = []
 
-# %%
+# %% [markdown]
 # Run the Kalman filter
 # ^^^^^^^^^^^^^^^^^^^^^
 # Now we have the components, we can execute the Kalman filter estimator on the simulated data.
@@ -390,10 +425,11 @@ nis_measures_history = []
 # :class:`~.GaussianState` we mentioned earlier. As the name suggests, this parameterises the state
 # as :math:`\mathcal{N}(\mathbf{x}_0, P_0)`. By happy chance the initial values are chosen to match
 # the truth quite well. You might want to manipulate these to see what happens.
+# %%
 from stonesoup.types.state import GaussianState
 prior = GaussianState([[0], [1], [0], [1]], np.diag([1.5, 0.5, 1.5, 0.5]), timestamp=start_time)
 
-# %%
+# %% [markdown]
 # In this instance data association is done somewhat implicitly. There is one prediction and
 # one detection per timestep so no need to think too deeply. Stone Soup discourages such
 # (undesirable) practice and requires that a :class:`~.Prediction` and :class:`~.Detection` are
@@ -401,13 +437,15 @@ prior = GaussianState([[0], [1], [0], [1]], np.diag([1.5, 0.5, 1.5, 0.5]), times
 # is a :class:`~.SingleHypothesis` which associates a single predicted state with a single
 # detection. There is much more detail on how the :class:`~.Hypothesis` class is used in later
 # tutorials.
+# %%
 from stonesoup.types.hypothesis import SingleHypothesis
 
-# %%
+# %% [markdown]
 # With this, we'll now loop through our measurements, predicting and updating at each timestep.
 # Uncontroversially, a Predictor has :meth:`predict` function and an Updater an :meth:`update` to
 # do this. Storing the information is facilitated by the top-level :class:`~.Track` class which
 # holds a sequence of states.
+# %%
 from stonesoup.types.track import Track
 track = Track()
 for measurement in measurements:
@@ -434,10 +472,10 @@ plotter.show()
 # %%
 # Plot the self-assessment measures
 from aduulm_scripts.utils.plotting import plot_selfassessment_with_nis
-plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
+fig = plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
                              assessor_type='KalmanSelfAssessor')
-
-# %%
+plt.show()
+# %% [markdown]
 # Key points
 # ----------
 # 1. Stone Soup is built on a variety of types of :class:`~.State` object. These can be used to
@@ -450,7 +488,7 @@ plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history
 #    association together with the :class:`~.MeasurementModel` to calculate the posterior state
 #    estimate.
 
-# %%
+# %% [markdown]
 # References
 # ----------
 # .. [#] Kalman 1960, A New Approach to Linear Filtering and Prediction Problems, Transactions of
@@ -459,7 +497,7 @@ plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history
 # .. [#] Anderson & Moore 1979, Optimal filtering,
 #        (http://users.cecs.anu.edu.au/~john/papers/BOOK/B02.PDF)
 
-# %%
+# %% [markdown]
 # Self-assessment references
 # ----------
 # .. [#] T. Griebel, J. Mueller, M. Buchholz, and K. Dietmayer, “Kalman filter meets subjective logic:

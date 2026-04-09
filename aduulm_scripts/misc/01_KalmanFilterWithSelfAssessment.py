@@ -1,0 +1,1981 @@
+#!/usr/bin/env python
+
+"""
+==========================================================
+1 - An introduction to Stone Soup: using the Kalman filter
+==========================================================
+"""
+
+# %%
+import numpy as np
+from datetime import datetime, timedelta
+# import subjective_logic as sl
+# from subjective_logic.draw_sl_opinions import *
+# import matplotlib.pyplot as plt
+# plt.rcParams['text.usetex'] = True
+import matplotlib
+from copy import deepcopy
+from stonesoup.types.prediction import GaussianStatePrediction, MeasurementPrediction
+from collections import deque
+from dataclasses import dataclass
+
+matplotlib.use('TkAgg')
+
+
+# draw_flags_opinion = {
+#     'draw_hypo_texts': True,
+#     'draw_axis': False,
+#     'draw_axis_label': True,
+#     'draw_opinion': True,
+#     'draw_opinion_label': True,
+#     'draw_prior': False,
+#     'draw_prior_label': True,
+#     'draw_projection': False,
+#     'draw_projection_label': True,
+#     'belief_label_position': 0.5,
+#     'disbelief_label_position': 0.7,
+#     'uncertainty_label_position': 0.7,
+# }
+
+# op = sl.Opinion(0.4, 0.2)
+# sl.create_triangle_plot()
+# draw_flags_opinion = {
+#     }
+# draw_full_opinion_triangle(op, '_X^{B}', None, draw_flags_opinion)
+# sl.draw_point(op)
+# plt.show()
+
+# %%
+from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
+from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel, \
+                                               ConstantVelocity
+
+# And the clock starts
+start_time = datetime.now().replace(microsecond=0)
+
+np.random.seed(1991)  # 1991
+
+# %%
+# factor = 100
+q_x = .1 #0.1
+q_y = .1 #0.1
+transition_model = CombinedLinearGaussianTransitionModel([ConstantVelocity(q_x),
+                                                          ConstantVelocity(q_y)])
+
+stationary_transition_model = deepcopy(transition_model)
+# %%
+# A 'truth path' is created starting at (0,0) moving to the NE at one distance unit per (time)
+# step in each dimension.
+timesteps = [start_time]
+truth = GroundTruthPath([GroundTruthState([0, 1, 0, 1], timestamp=timesteps[0])])
+
+
+# Import the disturbance method for the transition model
+from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
+disturbance_factor_process = 1/10
+# Disturbance configurations for ground truth generation
+gt_transition_configs = {
+    'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
+    'disturbance_mode': ['jump'],
+    'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
+}
+process_noise_coeff_memory = [[], []]
+
+num_steps = 400
+# np.random.seed(1991)
+for k in range(1, num_steps + 1):
+
+    timesteps.append(start_time+timedelta(seconds=k))  # add next timestep to list of timesteps
+
+    ###################################################################################################
+    # Disturb the transition model based on the disturbance modes
+    transition_model = disturbance_transition_model(transition_model, gt_transition_configs, k)
+    # Save the noise coefficients (process noise memory)
+    for i, model in enumerate(transition_model.model_list):
+        # Collect covariance matrices for each model component
+        process_noise_coeff_memory[i].append(model.noise_diff_coeff)
+    ###################################################################################################
+
+    truth.append(GroundTruthState(
+        transition_model.function(truth[k-1], noise=True, time_interval=timedelta(seconds=1)),
+        timestamp=timesteps[k]))
+
+# %%
+from stonesoup.plotter import AnimatedPlotterly
+plotter = AnimatedPlotterly(timesteps, tail_length=1) #, height=300) #, height=1000)
+plotter.plot_ground_truths(truth, [0, 2])
+plotter.fig
+
+
+# %%
+# We can check the :math:`F_k` and :math:`Q_k` matrices (generated over a 1s period).
+transition_model.matrix(time_interval=timedelta(seconds=1))
+
+# %%
+transition_model.covar(time_interval=timedelta(seconds=1))
+
+# %%
+# We're going to need a :class:`~.Detection` type to
+# store the detections, and a :class:`~.LinearGaussian` measurement model.
+from stonesoup.types.detection import Detection
+from stonesoup.models.measurement.linear import LinearGaussian
+import numpy as np
+
+# %%
+measurement_model = LinearGaussian(
+    ndim_state=4,  # Number of state dimensions (position and velocity in 2D)
+    mapping=(0, 2),  # Mapping measurement vector index to state index
+    noise_covar=np.array([[1, 0],  # Covariance matrix for Gaussian PDF
+                          [0, 1]])
+    )
+
+# measurement_model_2 = LinearGaussian(
+#     ndim_state=4,  # Number of state dimensions (position and velocity in 2D)
+#     mapping=(0, 1),  # Mapping measurement vector index to state index
+#     noise_covar=np.array([[1, 0],  # Covariance matrix for Gaussian PDF
+#                           [0, 1]])
+#     )
+
+# %%
+# Check the output is as we expect
+measurement_model.matrix()
+
+# %%
+measurement_model.covar()
+#%%
+stationary_measurement_model = deepcopy(measurement_model)
+
+# %%
+# Generate the measurements
+
+# Import the disturbance method for the measurement model
+from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
+# Disturbance configurations for measurement generation
+disturbance_factor_meas = 4
+gt_measurement_configs = {
+    'disturbance_mode': ['jump'],
+    'parameters': [[[50, disturbance_factor_meas], [100, 1/disturbance_factor_meas], [250, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]]
+}
+meas_std_dev_memory = []
+
+measurements = []
+for k, state in enumerate(truth):
+
+    # Disturb the measurement model based on the disturbance modes
+    measurement_model = disturbance_measurement_noise(measurement_model, gt_measurement_configs, k)
+
+    measurement = measurement_model.function(state, noise=True)
+    measurements.append(Detection(measurement,
+                                  timestamp=state.timestamp,
+                                  measurement_model=measurement_model))
+    meas_std_dev_memory.append(np.sqrt(measurement_model.noise_covar))
+# %%
+# Generate the measurements
+# measurements: list[Detection] = []
+# for state in truth:
+#     measurement = measurement_model.function(state, noise=True)
+#     measurements.append(Detection(measurement,
+#                                   timestamp=state.timestamp,
+#                                   measurement_model=measurement_model_2
+#                                   )
+#                         )
+
+# %%
+# Plot the result, again mapping the x and y position values
+plotter.plot_measurements(measurements, [0, 2])
+plotter.fig
+
+# %%
+from stonesoup.predictor.kalman import KalmanPredictor
+predictor = KalmanPredictor(transition_model)
+
+from stonesoup.updater.kalman import KalmanUpdater
+updater = KalmanUpdater(measurement_model)
+
+# %%
+# Construct a Self-Assessor for the Kalman Filter
+# ^^^^^^^^^^^^^^^^^^^^^^^^^
+#
+# We're now ready to construct a self-assessor to monitor the assumptions of the Kalman filter.
+
+from stonesoup.selfassessor.kalman_selfassessor import KalmanSelfAssessor
+# Self-assessor settings
+sa_settings = {
+    "num_X": 7,
+    "n_st": 20,
+    "n_c": 1,
+    "dim_meas": measurement_model.ndim_meas,
+    "alpha_threshold_dc": 0.1,
+    "trust_discount": 0.99,
+}
+selfassessor = KalmanSelfAssessor(num_X=sa_settings["num_X"],
+                                  n_st=sa_settings["n_st"],
+                                  n_c=sa_settings["n_c"],
+                                  dim_meas=sa_settings["dim_meas"],
+                                  alpha_threshold_dc=sa_settings["alpha_threshold_dc"],
+                                  trust_discount=sa_settings["trust_discount"])
+selfassessor_measures_history = []
+
+from stonesoup.selfassessor.nis import NIS
+# NIS settings
+nis_settings = {
+    "window_length": 1,  # window size of the NIS averaging
+    "alpha": 0.01,  # significance level
+    "dim_meas": measurement_model.ndim_meas,
+}
+nis = NIS(window_length=nis_settings["window_length"],
+          alpha=nis_settings["alpha"],
+          dim=nis_settings["dim_meas"])
+nis_measures_history = []
+
+
+def anderson_darling_uniform(x):
+    x = np.sort(np.asarray(x))
+    n = len(x)
+
+    if n < 2:
+        return np.nan
+
+    i = np.arange(1, n + 1)
+
+    # clamp for numerical stability
+    x = np.clip(x, 1e-12, 1 - 1e-12)
+
+    term1 = (2*i - 1) * (np.log(x) + np.log(1 - x[::-1]))
+    A2 = -n - np.sum(term1) / n
+
+    return A2
+
+import scipy.linalg
+from datetime import timedelta
+def compute_stationary_kf_quantities(transition_model, measurement_model, prior):
+    """
+    Berechnet stationäre KF-Größen für lineares zeitinvariantes Modell:
+      P_inf, K_inf, S_inf, Sigma_eta_inf, mu_R, sigma_R
+
+    Erwartet:
+      transition_model.matrix()
+      transition_model.covar()
+      measurement_model.matrix()
+      measurement_model.covar()
+    """
+
+
+    dt = timedelta(seconds=1)
+    F = np.asarray(transition_model.matrix(time_interval = dt), dtype=float)
+    Q = np.asarray(transition_model.covar(time_interval = dt), dtype=float)
+    H = np.asarray(measurement_model.matrix(time_interval = dt), dtype=float)
+    R = np.asarray(measurement_model.covar(time_interval = dt), dtype=float)
+
+    n = F.shape[0]
+    m = H.shape[0]
+
+    # Diskrete algebraische Riccati-Gleichung:
+    # P = FPF^T - FPH^T(HPH^T+R)^-1HPF^T + Q
+    #
+    # scipy solve_discrete_are löst:
+    # A^T X A - X - A^T X B (R + B^T X B)^-1 B^T X A + Q = 0
+    #
+    # Dazu setzen wir:
+    # A = F^T, B = H^T, Q_dare = Q, R_dare = R
+    #
+    # Praktisch funktioniert für Kalman oft direkt:
+    P_inf = scipy.linalg.solve_discrete_are(
+        a=F.T,
+        b=H.T,
+        q=Q,
+        r=R
+    )
+
+    S_inf = H @ P_inf @ H.T + R
+    K_inf = P_inf @ H.T @ np.linalg.inv(S_inf)
+
+    I_m = np.eye(m)
+    Sigma_eta_inf = (I_m - H @ K_inf) @ S_inf @ (I_m - H @ K_inf).T
+
+    R_inv = np.linalg.inv(R)
+    B = R_inv @ Sigma_eta_inf
+
+    mu_R = np.trace(B)
+    sigma_R = np.sqrt(2.0 * np.trace(B @ B) + 1e-12)
+
+    return {
+        "F": F,
+        "Q": Q,
+        "H": H,
+        "R": R,
+        "P_inf": P_inf,
+        "S_inf": S_inf,
+        "K_inf": K_inf,
+        "Sigma_eta_inf": Sigma_eta_inf,
+        "R_inv": R_inv,
+        "mu_R": mu_R,
+        "sigma_R": sigma_R,
+    }
+# %%
+# ============================================================
+# Paper-based AKF: RTS smoother + exact weighting factors
+# ============================================================
+
+@dataclass
+class PaperAKFConfig:
+    N_smooth: int = 10
+    L_update: int = 5
+    eps: float = 1e-9
+    gamma_q: float = 1.0
+    gamma_r: float = 1.0
+
+
+@dataclass
+class PaperAKFState:
+    Q_est: np.ndarray
+    R_est: np.ndarray
+    SSV: np.ndarray   # measurement-noise sum of squares
+    SSW: np.ndarray   # process-noise sum of squares
+    l_count: int = 0
+
+
+def init_paper_akf_state(Q0: np.ndarray, R0: np.ndarray) -> PaperAKFState:
+    n_x = Q0.shape[0]
+    n_z = R0.shape[0]
+    return PaperAKFState(
+        Q_est=Q0.copy(),
+        R_est=R0.copy(),
+        SSV=np.zeros(n_z, dtype=float),
+        SSW=np.zeros(n_x, dtype=float),
+        l_count=0,
+    )
+
+
+def block_diag(mats):
+    rows = sum(M.shape[0] for M in mats)
+    cols = sum(M.shape[1] for M in mats)
+    out = np.zeros((rows, cols), dtype=float)
+    r = 0
+    c = 0
+    for M in mats:
+        rr, cc = M.shape
+        out[r:r+rr, c:c+cc] = M
+        r += rr
+        c += cc
+    return out
+
+
+def build_C_matrix(F: np.ndarray, N: int):
+    """
+    C from the paper, shape ((N+1)n_x, (N+1)n_x)
+    """
+    n_x = F.shape[0]
+    C = np.zeros(((N+1)*n_x, (N+1)*n_x), dtype=float)
+
+    for i in range(N+1):
+        C[i*n_x:(i+1)*n_x, i*n_x:(i+1)*n_x] = np.eye(n_x)
+
+    for i in range(1, N+1):
+        C[i*n_x:(i+1)*n_x, (i-1)*n_x:i*n_x] = -F
+
+    return C
+
+
+def build_H_big(H: np.ndarray, N: int):
+    """
+    H_big from the paper, shape (N*n_z, (N+1)n_x)
+    row-block i uses [0, H] to map x_{k-N+1}, ..., x_k
+    """
+    n_z, n_x = H.shape
+    H_big = np.zeros((N*n_z, (N+1)*n_x), dtype=float)
+
+    for i in range(N):
+        col = (i + 1) * n_x
+        H_big[i*n_z:(i+1)*n_z, col:col+n_x] = H
+
+    return H_big
+
+
+def compute_weighting_factors_exact(F: np.ndarray, H: np.ndarray, Q: np.ndarray, R: np.ndarray, N: int, eps: float = 1e-9):
+    """
+    Exact finite-horizon weighting factors according to the paper equations.
+
+    dv_r = tr(T_r^T T_r U)
+    dw_q = tr(T_q*^T T_q* V H C^{-1})
+
+    with
+      U = I - H_big A H_big^T R_big^{-1}
+      V = C A H_big^T R_big^{-1}
+      A = (H_big^T R_big^{-1} H_big + C^T Q_big^{-1} C)^(-1)
+    """
+    n_x = F.shape[0]
+    n_z = H.shape[0]
+
+    # Block matrices
+    R_big = block_diag([R for _ in range(N)])
+    Q_big = block_diag([Q for _ in range(N+1)])
+    H_big = build_H_big(H, N)
+    C = build_C_matrix(F, N)
+
+    R_big_inv = np.linalg.inv(R_big + eps * np.eye(R_big.shape[0]))
+    Q_big_inv = np.linalg.inv(Q_big + eps * np.eye(Q_big.shape[0]))
+
+    A = np.linalg.inv(H_big.T @ R_big_inv @ H_big + C.T @ Q_big_inv @ C + eps * np.eye((N+1)*n_x))
+    U = np.eye(N * n_z) - H_big @ A @ H_big.T @ R_big_inv
+    V = C @ A @ H_big.T @ R_big_inv
+    C_inv = np.linalg.inv(C)
+
+    # Measurement weighting factors dv_r
+    dv = np.zeros(n_z, dtype=float)
+    for r in range(n_z):
+        T_r = np.zeros((N, N * n_z), dtype=float)
+        for j in range(N):
+            T_r[j, j*n_z + r] = 1.0
+        dv[r] = np.trace(T_r @ U @ T_r.T)
+
+    # Process weighting factors dw_q
+    dw = np.zeros(n_x, dtype=float)
+    VH_Cinv = V @ H_big @ C_inv
+    for q in range(n_x):
+        Tq_star = np.zeros((N, (N+1) * n_x), dtype=float)
+        for j in range(N):
+            # skip initial epsilon_0 component, select w_{k-N+1},...,w_k
+            block_idx = j + 1
+            Tq_star[j, block_idx*n_x + q] = 1.0
+        dw[q] = np.trace(Tq_star @ VH_Cinv @ Tq_star.T)
+
+    dv = np.maximum(dv, eps)
+    dw = np.maximum(dw, eps)
+
+    return dv, dw
+
+
+def rts_smoother_window(filtered_states, predicted_states, F):
+    """
+    Standard RTS smoother over one window.
+
+    filtered_states:  list of posterior GaussianState, length N+1
+    predicted_states: list of prior GaussianState for steps 1..N in the same window, length N
+                      predicted_states[i-1] corresponds to prediction of filtered_states[i]
+    Returns:
+        x_smooth_window: shape (N+1, n_x)
+        P_smooth_window: list of covariances, length N+1
+    """
+    Np1 = len(filtered_states)
+    n_x = filtered_states[0].covar.shape[0]
+
+    x_s = [None] * Np1
+    P_s = [None] * Np1
+
+    x_s[-1] = np.asarray(filtered_states[-1].state_vector, dtype=float).reshape(-1, 1)
+    P_s[-1] = np.asarray(filtered_states[-1].covar, dtype=float)
+
+    for k in range(Np1 - 2, -1, -1):
+        x_f = np.asarray(filtered_states[k].state_vector, dtype=float).reshape(-1, 1)
+        P_f = np.asarray(filtered_states[k].covar, dtype=float)
+
+        x_pred_next = np.asarray(predicted_states[k].state_vector, dtype=float).reshape(-1, 1)
+        P_pred_next = np.asarray(predicted_states[k].covar, dtype=float)
+
+        J = P_f @ F.T @ np.linalg.inv(P_pred_next)
+        x_s[k] = x_f + J @ (x_s[k+1] - x_pred_next)
+        P_s[k] = P_f + J @ (P_s[k+1] - P_pred_next) @ J.T
+
+    x_smooth_window = np.stack([x.reshape(-1) for x in x_s], axis=0)
+    return x_smooth_window, P_s
+
+
+def estimate_noise_sequences_from_smoothed_states(z_window, x_smooth_window, F, H):
+    """
+    Paper equations:
+      v_{k-i|k} = z_{k-i} - H x_{k-i|k}
+      w_{k-i|k} = x_{k-i|k} - F x_{k-i-1|k}
+    """
+    v_hat_seq = z_window - (H @ x_smooth_window[1:].T).T
+    Fx_prev = (F @ x_smooth_window[:-1].T).T
+    w_hat_seq = x_smooth_window[1:] - Fx_prev
+    return v_hat_seq, w_hat_seq
+
+
+def update_paper_sums_and_covariances(
+    paper_state: PaperAKFState,
+    v_hat_seq: np.ndarray,
+    w_hat_seq: np.ndarray,
+    dv: np.ndarray,
+    dw: np.ndarray,
+    cfg: PaperAKFConfig,
+):
+    """
+    Implements paper update:
+      SSV += sum(v^2)
+      SSW += sum(w^2)
+      every L_update:
+        sigma_v^2 = SSV / (dv * L)
+        sigma_w^2 = SSW / (dw * L)
+    """
+    paper_state.SSV += np.sum(v_hat_seq ** 2, axis=0)
+    paper_state.SSW += np.sum(w_hat_seq ** 2, axis=0)
+    paper_state.l_count += 1
+
+    if paper_state.l_count < cfg.L_update:
+        return None
+
+    sigma_v2_hat = paper_state.SSV / np.maximum(dv * cfg.L_update, cfg.eps)
+    sigma_w2_hat = paper_state.SSW / np.maximum(dw * cfg.L_update, cfg.eps)
+
+    sigma_v2_hat = np.maximum(sigma_v2_hat, cfg.eps)
+    sigma_w2_hat = np.maximum(sigma_w2_hat, cfg.eps)
+
+    paper_state.R_est = np.diag(sigma_v2_hat)
+    paper_state.Q_est = np.diag(sigma_w2_hat)
+
+    paper_state.SSV[:] = 0.0
+    paper_state.SSW[:] = 0.0
+    paper_state.l_count = 0
+
+    return sigma_w2_hat, sigma_v2_hat, paper_state.Q_est.copy(), paper_state.R_est.copy()
+
+
+def covariance_deviation_score(C_hat: np.ndarray, C_nom: np.ndarray, eps: float = 1e-12) -> float:
+    num = np.linalg.norm(C_hat - C_nom, ord="fro")
+    den = np.linalg.norm(C_nom, ord="fro") + eps
+    return float(num / den)
+
+
+def deviation_to_probability_rational(d: float, tau: float) -> float:
+    return float(np.clip(d / (d + tau + 1e-12), 0.0, 1.0))
+# # %%
+# # ============================================================
+# # Paper-based AKF covariance estimation helpers
+# # ============================================================
+#
+# @dataclass
+# class PaperAKFConfig:
+#     N_smooth: int = 10      # smoothing horizon N
+#     L_update: int = 5       # number of smoother windows before covariance update
+#     eps: float = 1e-9
+#     opinion_gamma_q: float = 3.0
+#     opinion_gamma_r: float = 3.0
+#
+#
+# @dataclass
+# class PaperAKFState:
+#     Q_est: np.ndarray
+#     R_est: np.ndarray
+#     SSV: np.ndarray
+#     SSW: np.ndarray
+#     l_count: int = 0
+#
+#
+# def init_paper_akf_state(Q0: np.ndarray, R0: np.ndarray) -> PaperAKFState:
+#     return PaperAKFState(
+#         Q_est=Q0.copy(),
+#         R_est=R0.copy(),
+#         SSV=np.zeros(Q0.shape[0], dtype=float),   # process noise components
+#         SSW=np.zeros(R0.shape[0], dtype=float),   # measurement noise components
+#     )
+#
+#
+# def estimate_noise_sequences_from_smoothed_states(
+#     z_window: np.ndarray,
+#     x_smooth_window: np.ndarray,
+#     F: np.ndarray,
+#     H: np.ndarray,
+# ):
+#     """
+#     Paper formulas:
+#         v_{k-i|k} = z_{k-i} - H x_{k-i|k}
+#         w_{k-i|k} = x_{k-i|k} - F x_{k-i-1|k}
+#     """
+#     # x_smooth_window shape: (N+1, n_x)
+#     # z_window shape:        (N,   n_z)
+#
+#     v_hat_seq = z_window - (H @ x_smooth_window[1:].T).T
+#     Fx_prev = (F @ x_smooth_window[:-1].T).T
+#     w_hat_seq = x_smooth_window[1:] - Fx_prev
+#
+#     return v_hat_seq, w_hat_seq
+#
+#
+# def accumulate_paper_sums(
+#     paper_state: PaperAKFState,
+#     v_hat_seq: np.ndarray,
+#     w_hat_seq: np.ndarray,
+# ):
+#     # measurement-noise sum of squares
+#     paper_state.SSW += np.sum(v_hat_seq ** 2, axis=0)
+#     # process-noise sum of squares
+#     paper_state.SSV += np.sum(w_hat_seq ** 2, axis=0)
+#     paper_state.l_count += 1
+#
+#
+# def update_paper_covariances(
+#     paper_state: PaperAKFState,
+#     dv: np.ndarray,
+#     dw: np.ndarray,
+#     L_update: int,
+#     eps: float = 1e-9,
+# ):
+#     """
+#     Paper formulas:
+#         sigma_v^2 = SSV / (d_v * L)
+#         sigma_w^2 = SSW / (d_w * L)
+#     """
+#     sigma_w2_hat = paper_state.SSV / np.maximum(dw * L_update, eps)
+#     sigma_v2_hat = paper_state.SSW / np.maximum(dv * L_update, eps)
+#
+#     sigma_w2_hat = np.maximum(sigma_w2_hat, eps)
+#     sigma_v2_hat = np.maximum(sigma_v2_hat, eps)
+#
+#     paper_state.Q_est = np.diag(sigma_w2_hat)
+#     paper_state.R_est = np.diag(sigma_v2_hat)
+#
+#     paper_state.SSV[:] = 0.0
+#     paper_state.SSW[:] = 0.0
+#     paper_state.l_count = 0
+#
+#     return sigma_w2_hat, sigma_v2_hat, paper_state.Q_est.copy(), paper_state.R_est.copy()
+#
+#
+# def covariance_deviation_score(C_hat: np.ndarray, C_nom: np.ndarray, eps: float = 1e-12) -> float:
+#     num = np.linalg.norm(C_hat - C_nom, ord="fro")
+#     den = np.linalg.norm(C_nom, ord="fro") + eps
+#     return float(num / den)
+#
+#
+# def deviation_to_probability(d: float, gamma: float) -> float:
+#     p = 1.0 - np.exp(-gamma * max(d, 0.0))
+#     return float(np.clip(p, 0.0, 1.0))
+#
+# # ============================================================
+# # User hooks to implement/replace
+# # ============================================================
+#
+# def run_fixed_interval_smoother_stub(filtered_track_window):
+#     """
+#     PLACEHOLDER.
+#     Muss geglättete Zustände x_{k-N|k}, ..., x_{k|k} liefern.
+#
+#     Erwartete Rückgabe:
+#         np.ndarray of shape (N+1, 4)
+#     """
+#     # --- TEMPORARY FALLBACK ---
+#     # Not a true smoother. Only a placeholder so the code structure is clear.
+#     x_smooth_window = np.stack(
+#         [np.asarray(state.state_vector).reshape(-1) for state in filtered_track_window],
+#         axis=0
+#     )
+#     return x_smooth_window
+#
+#
+# def compute_weighting_factors_stub(R: np.ndarray, Q: np.ndarray, n_x: int, n_z: int):
+#     """
+#     PLACEHOLDER.
+#     Paper requires weighting factors dv and dw.
+#     Replace with the exact formulas / numerical implementation from the paper.
+#
+#     Returns:
+#         dv: shape (n_z,)
+#         dw: shape (n_x,)
+#     """
+#     # Conservative placeholder: ones
+#     dv = np.ones(n_z, dtype=float)
+#     dw = np.ones(n_x, dtype=float)
+#     return dv, dw
+# %%
+from stonesoup.types.state import GaussianState
+prior = GaussianState([[0], [1], [0], [1]], np.diag([.5, 0.1, .5, 0.1]), timestamp=start_time)
+
+# %%
+from stonesoup.types.hypothesis import SingleHypothesis
+
+# %%
+import subjective_logic as sl
+from subjective_logic.draw_sl_opinions import *
+
+# %%
+from stonesoup.types.track import Track
+from scipy.stats import chi2, beta
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import scipy.linalg
+from scipy.stats import gaussian_kde
+from math import sqrt, ceil
+
+track = Track()
+alphas = np.array([1.0, 1.0])
+ad_alphas = np.array([1.0, 1.0])
+q_alphas = np.array([1.0, 1.0])
+q2_alphas = np.array([1.0, 1.0])
+ks_alphas = np.array([1.0, 1.0])
+alphas_R = np.array([1.0, 1.0])
+m = len(measurement_model.mapping)
+assert m == 2
+evidence_per_step = 1.0
+opinions = []
+opinions_ad = []
+op_griebel = []
+dirichlet_pdfs = []
+x_pdf = np.linspace(0.001, 0.999, 500)
+forget_param = 0.9
+cum_u = []
+cum_lr = []
+
+M = int(ceil(sqrt(1/(1 - forget_param))))  # Anzahl Bins, 8
+# print("# of Bins:", M)
+bin_edges = np.linspace(0.0, 1.0, M + 1)
+counts = np.ones(M) * (1/M)
+# counts = np.ones(2) * (1/2)
+# print("counts:", counts)
+# buffer für u_k
+u_buffer = []
+u_r_buffer = []
+max_buffer = M **2
+
+# window_size = 50  # optional (rolling window)
+u_history = []
+C_history = []
+K_history = []
+counts_history = []
+counts_R = np.ones(M) * (1/M)
+counts_R_history = []
+nu_history = []
+kl_C_history = []
+kl_kde_history = []
+belief_history = []
+disbelief_history = []
+uncertainty_history = []
+ad_belief_history = []
+ad_disbelief_history = []
+ad_uncertainty_history = []
+ks_history = []
+ad_history= []
+cvm_history= []
+
+e_beta_history = []
+ad_e_beta_history = []
+ks_e_beta_history = []
+q_e_beta_history = []
+
+op_obj_history = []
+ad_op_obj_history = []
+ks_op_obj_history = []
+q_op_obj_history = []
+r_op_obj_history = []
+fused_op_obj_history = []
+fused_2_op_obj_history = []
+
+dc_history = []
+p_r_history = []
+p_q_history = []
+p_s_history = []
+q2_e_beta_history = []
+q_comb_e_beta_history = []
+q2_op_obj_history = []
+
+pi0_history = []
+piQ_history = []
+piR_history = []
+piQR_history = []
+decision_history = []
+
+kl_tests_history= []
+
+# stationary = compute_stationary_kf_quantities(
+#     transition_model=stationary_transition_model,
+#     measurement_model=stationary_measurement_model,
+#     prior=prior
+# )
+#
+# K_inf = stationary["K_inf"]
+# P_inf = stationary["P_inf"]
+# S_inf = stationary["S_inf"]
+# Sigma_eta_inf = stationary["Sigma_eta_inf"]
+# R_inv = stationary["R_inv"]
+# mu_R_nom = stationary["mu_R"]
+# sigma_R_nom = stationary["sigma_R"]
+#
+# print("K_inf:\n", K_inf)
+# print("P_inf:\n", P_inf)
+# print("mu_R_nom:", mu_R_nom)
+# print("sigma_R_nom:", sigma_R_nom)
+#
+# H_inf = measurement_model.matrix()
+# R_inf = measurement_model.covar()
+#
+# S_q_inf = H_inf @ P_inf @ H_inf.T
+#
+# w_R = np.trace(np.linalg.solve(S_inf, R_inf)) / m
+# w_Q = np.trace(np.linalg.solve(S_inf, S_q_inf)) / m
+w_R = 0.45
+w_Q = 0.55
+#
+# print("w_Q =", w_Q)
+# print("w_R =", w_R)
+# print("w_Q + w_R =", w_Q + w_R)
+#
+# # ---------------------------------
+# # Q/R signature parameters
+# # ---------------------------------
+# L_q = 3
+# lambda_rq = 0.5   # stronger suppression of Q leakage into R
+# c_q = 2.0
+# c_r = 2.0
+#
+# sq_history = []
+# sr0_history = []
+# sr_history = []
+# pq_raw_history = []
+# pr_raw_history = []
+#
+# # ============================================================
+# # Paper-based covariance estimation setup
+# # ============================================================
+#
+paper_cfg = PaperAKFConfig(
+    N_smooth=10,
+    L_update=5,
+    eps=1e-9,
+    gamma_q=1.0,
+    gamma_r=1.0,
+)
+#
+# # nominal covariances for diagnosis
+# dt = timedelta(seconds=1)
+# F_paper = np.asarray(stationary_transition_model.matrix(time_interval=dt), dtype=float)
+# Q_nom = np.asarray(stationary_transition_model.covar(time_interval=dt), dtype=float)
+# H_paper = np.asarray(stationary_measurement_model.matrix(), dtype=float)
+# R_nom = np.asarray(stationary_measurement_model.covar(), dtype=float)
+#
+# paper_state = init_paper_akf_state(Q0=Q_nom, R0=R_nom)
+#
+filtered_state_buffer = deque(maxlen=paper_cfg.N_smooth + 1)
+predicted_state_buffer = deque(maxlen=paper_cfg.N_smooth)
+measurement_buffer = deque(maxlen=paper_cfg.N_smooth)
+#
+Q_hat_paper_history = []
+R_hat_paper_history = []
+p_q_paper_history = []
+p_r_paper_history = []
+q_paper_op_obj_history = []
+r_paper_op_obj_history = []
+dv_history_paper = []
+dw_history_paper = []
+
+# # tuning for covariance-to-probability mapping
+# tau_q_paper_map = 5.0
+# tau_r_paper_map = 5.0
+
+
+for i, measurement in enumerate(measurements):
+    prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
+    hypothesis = SingleHypothesis(prediction, measurement)  # Group a prediction and measurement
+    post = updater.update(hypothesis)
+    track.append(post)
+    prior = track[-1]
+
+    filtered_state_buffer.append(post)
+    predicted_state_buffer.append(prediction)
+    measurement_buffer.append(np.asarray(measurement.state_vector).reshape(-1))
+
+    # self-assessment
+    z_p = hypothesis.measurement_prediction.mean
+    S_p = hypothesis.measurement_prediction.covar
+    selfassessor.assess(z_p, S_p, measurement.state_vector)
+    selfassessor_measures = selfassessor.get_sas_measures()
+    nis_measures = nis.assess(z_p, S_p, measurement.state_vector)
+    selfassessor_measures_history.append(selfassessor_measures)
+    nis_measures_history.append(nis_measures)
+    op_griebel.append(selfassessor._op_st)
+
+    # -----------------------------
+    # Likelihood → Evidence
+    # -----------------------------
+    meas_pred = hypothesis.measurement_prediction.mean
+    delta = (measurement.state_vector - meas_pred).copy()
+    S = hypothesis.measurement_prediction.covar.copy()
+    delta = delta.reshape(-1, 1)
+    P = hypothesis.prediction.covar
+    H = measurement_model.matrix()
+    K = P @ H.T @ np.linalg.inv(S)
+    # print(K)
+    K_history.append(K)
+
+    H_nom = measurement_model.matrix()
+    R_nom = measurement_model.covar()
+    R_inv = np.linalg.inv(R_nom)
+
+    # Nominale stationäre Größen:
+    P_nom = prior.covar.copy()
+    S_nom = H_nom @ P_nom @ H_nom.T + R_nom
+    K_nom = P_nom @ H_nom.T @ np.linalg.inv(S_nom)
+
+    A_nom = np.eye(H_nom.shape[0]) - H_nom @ K_nom
+    Sigma_eta_nom = A_nom @ S_nom @ A_nom.T
+
+    B_nom = R_inv @ Sigma_eta_nom
+    mu_R_nom = np.trace(B_nom)
+    sigma_R_nom = np.sqrt(2.0 * np.trace(B_nom @ B_nom) + 1e-12)
+
+    gamma_R = 1.0
+
+    # -----------------------------
+    # Whitening
+    # -----------------------------
+    S_sqrt = np.linalg.cholesky(S)
+    nu_white = np.linalg.solve(S_sqrt, delta).flatten()
+
+    nu_history.append(nu_white)
+    if len(nu_history) > max_buffer:
+        nu_history.pop(0)
+
+    # OLD Q-TEST
+    rho = 0
+    if len(nu_history) >= 5:
+
+        nu_stack = np.stack(nu_history, axis=0)
+
+        # empirische Kovarianz
+        Sigma = np.cov(nu_stack, rowvar=False)
+        Sigma += 1e-6 * np.eye(Sigma.shape[0])
+        try:
+            L = np.linalg.cholesky(Sigma)
+            L_inv = np.linalg.inv(L)
+
+            nu_rewhite = (L_inv @ nu_stack.T).T  # shape: (N, dim)
+
+        except np.linalg.LinAlgError:
+            nu_rewhite = nu_stack  # fallback
+
+        for k in range(1, len(nu_rewhite)):
+            rho += np.dot(nu_rewhite[k], nu_rewhite[k - 1]) / nu_rewhite.shape[1]
+
+        rho /= (len(nu_rewhite) - 1)
+        # print("nu_stack: ", nu_stack)
+        # print("rho: ", rho)
+        # print("nu_rewhite: ", nu_rewhite)
+        # print("nu_rewhite shape:", nu_rewhite.shape)
+        # print("Sigma: ", Sigma)
+        # print("L_inv: ", L_inv)
+        # print("L:", L)
+
+        N = len(nu_rewhite)
+        T_Q = rho ** 2
+        e_beta_Q = 1 - np.exp(-sqrt(N/m) * T_Q)
+        e_alpha_Q = 1 - e_beta_Q
+
+        # N = len(nu_rewhite)
+        # T_Q = N * m * (rho ** 2)
+        # e_beta_Q = 1.0 - chi2.cdf(T_Q, df=1)
+        # e_alpha_Q = 1.0 - e_beta_Q
+
+        q_e_beta_history.append(e_beta_Q)
+        q_alphas *= forget_param
+        q_alphas += np.array([e_alpha_Q, e_beta_Q])
+
+        q_alphas = np.clip(q_alphas, 1, a_max=None)
+
+        dist = sl.DirichletDistribution2d(q_alphas)
+        q_opinion = dist.as_opinion()
+        q_op_obj_history.append(q_opinion)
+
+    else:
+        q_opinion = sl.Opinion(0, 0)
+        q_op_obj_history.append(q_opinion)
+
+
+    d2 = (delta.T @ np.linalg.inv(S) @ delta).item()
+    u = chi2.cdf(d2, df=m)
+    cum_u.append(u)
+
+    u_history.append(u)
+
+    u_buffer.append(u)
+    if len(u_buffer) > max_buffer:
+        u_buffer.pop(0)
+
+    A2 = anderson_darling_uniform(u_buffer)
+
+    if not np.isnan(A2):
+        ad_s = A2
+
+        # -------------------------
+        # Evidence mapping (SL)
+        # -------------------------
+        c = sqrt(max_buffer)
+        N_eff = np.sum(u_buffer)
+        e_beta = (1 - np.exp(- (ad_s/c)))    #ad_p_value(ad_s, N=len(u_buffer)) #np.exp(- (ad_s/c))
+        e_alpha = (1 - e_beta)
+        # e_beta = 1.0 - ad_p
+        # e_alpha = ad_p
+        ad_e_beta_history.append(e_beta)
+
+
+        ad_alphas *= forget_param
+        ad_alphas += np.array([e_alpha, e_beta])
+        # print(np.sum(ad_alphas))
+        # ad_alphas = np.array([1.0, 1.0]) + np.array([e_alpha, e_beta])
+        ad_alphas = np.clip(ad_alphas, 1, a_max=None)
+
+        dist = sl.DirichletDistribution2d(ad_alphas)
+
+        ad_opinion = dist.as_opinion()
+
+        # uncertainty maximized
+        projected = ad_opinion.getProjection()
+        u_max = min(projected[0] / ad_opinion.prior_belief_masses[0], projected[1] / ad_opinion.prior_belief_masses[1])
+        b_max = projected[0] - ad_opinion.prior_belief_masses[0] * u_max
+        d_max = projected[1] - ad_opinion.prior_belief_masses[1] * u_max
+        opinion_max = sl.Opinion(b_max, d_max)
+        r_paper_op_obj_history.append(opinion_max)
+        q_paper_op_obj_history.append(opinion_max)
+        ad_opinion = opinion_max
+        ad_op_obj_history.append(ad_opinion)
+        # opinion.prior_belief_masses = [1.0, 0]
+        opinions_ad.append((ad_opinion.belief(), ad_opinion.disbelief(), ad_opinion.uncertainty()))
+        ad_belief_history.append(ad_opinion.belief())
+        ad_disbelief_history.append(ad_opinion.disbelief())
+        ad_uncertainty_history.append(ad_opinion.uncertainty())
+
+
+
+    else:
+        ad_opinion = sl.Opinion(0, 0)
+        ad_op_obj_history.append(ad_opinion)
+        opinions_ad.append((0.0, 0.0, 1))
+
+
+    counts = np.ones(M) * (1/M)
+    for u_i in u_buffer:
+        idx = np.searchsorted(bin_edges, u_i, side='right') - 1
+        idx = np.clip(idx, 0, M - 1)
+        counts[idx] += 1
+
+    # idx = np.searchsorted(bin_edges, u, side='right') - 1
+    # idx = np.clip(idx, 0, M - 1)
+    # counts *= forget_param
+    # counts[idx] += 1  # 1
+    # counts[idx] += 0.7
+    # counts[max(idx - 1, 0)] += 0.15
+    # counts[min(idx + 1, M - 1)] += 0.15
+
+
+    counts_history.append(list(counts))
+
+    N = np.sum(counts)
+
+    p = counts / N
+
+    # numerisch stabil
+    p_safe = np.clip(p, 1e-12, 1.0)
+
+    H = -1 * np.sum(p_safe * np.log(p_safe))
+    H_max = np.log(M)
+
+    C = H / H_max  # ∈ [0,1]
+
+    # KL-Divergence
+    kl_C = -H + H_max
+    kl_C_history.append(kl_C)
+
+
+    C_history.append(C)
+    # N_eff = (np.sum(counts))
+    # # C-scale as transformation of KL-divergence
+    # e_alpha = C #*N_eff
+    # e_beta = (1 - C) #*N_eff
+
+    N_eff = len(u_buffer)
+
+    D_KL = np.log(M) - H
+    D_KL_bias = (M - 1) / (2.0 * max(N_eff, 1))
+    D_KL_corr = max(0.0, D_KL - D_KL_bias)
+
+    kappa_kl = 1.0
+    p_kl = 1.0 - np.exp(-kappa_kl * N_eff * D_KL_corr)
+
+    e_beta = p_kl
+    e_alpha = 1.0 - p_kl
+
+    alphas *= forget_param
+    alphas += np.array([e_alpha, e_beta])
+    # alphas = np.array([1.0, 1.0]) + [e_alpha, e_beta]
+    alphas = np.maximum(alphas, 1)
+    # print(i, ": ", C, N_eff, e_alpha, e_beta)
+    e_beta_history.append(e_beta)
+    # -----------------------------
+    # Subjective Logic Opinion
+    # -----------------------------
+    dist = sl.DirichletDistribution2d(alphas)
+
+    pdf = list(map(dist.evaluate, x_pdf))
+    # pdf = beta.pdf(x_pdf, alphas[0], alphas[1])
+    dirichlet_pdfs.append(pdf)
+
+    opinion = dist.as_opinion()
+
+    # uncertainty maximized
+    projected = opinion.getProjection()
+    u_max = min(projected[0]/opinion.prior_belief_masses[0], projected[1]/opinion.prior_belief_masses[1])
+    b_max = projected[0] - opinion.prior_belief_masses[0] * u_max
+    d_max = projected[1] - opinion.prior_belief_masses[1] * u_max
+    opinion_max = sl.Opinion(b_max, d_max)
+    r_paper_op_obj_history.append(opinion_max)
+    q_paper_op_obj_history.append(opinion_max)
+    opinion = opinion_max
+    op_obj_history.append(opinion)
+    # opinion.prior_belief_masses = [1.0, 0]
+    opinions.append((opinion.belief(), opinion.disbelief(), opinion.uncertainty()))
+    belief_history.append(opinion.belief())
+    disbelief_history.append(opinion.disbelief())
+    uncertainty_history.append(opinion.uncertainty())
+
+
+
+
+    counts_R_history = counts_history.copy()
+
+    # ---------------------------------
+    # R-ISO TEST:
+    # remove temporal structure first, then test covariance mismatch
+    # ---------------------------------
+    e_beta_R_iso = 0.0
+
+    if len(nu_history) >= 8:
+        nu_stack_r = np.stack(nu_history, axis=0)  # shape (N, m)
+        N_r = len(nu_stack_r)
+
+        # mean removal
+        nu_stack_r = nu_stack_r - np.mean(nu_stack_r, axis=0, keepdims=True)
+
+        # zero-lag covariance
+        C0 = (nu_stack_r.T @ nu_stack_r) / N_r
+        C0 += 1e-6 * np.eye(C0.shape[0])
+
+        # lag-1 cross covariance
+        C1 = np.zeros((m, m), dtype=float)
+        for k in range(1, N_r):
+            C1 += np.outer(nu_stack_r[k], nu_stack_r[k - 1])
+        C1 /= (N_r - 1)
+
+        # AR(1)-like coefficient
+        A = C1 @ np.linalg.inv(C0)
+
+        # de-temporalized residuals
+        r_list = []
+        for k in range(1, N_r):
+            r_k = nu_stack_r[k] - A @ nu_stack_r[k - 1]
+            r_list.append(r_k)
+
+        r_stack = np.stack(r_list, axis=0)
+        r_stack = r_stack - np.mean(r_stack, axis=0, keepdims=True)
+
+        Sigma_r = np.cov(r_stack, rowvar=False)
+        Sigma_r += 1e-6 * np.eye(Sigma_r.shape[0])
+
+        # conservative R-score: diagonal mismatch only
+        diag_err = np.diag(Sigma_r) - np.ones(m)
+        S_R_iso = float(np.dot(diag_err, diag_err) / m)
+
+        # finite-sample floor (simple online-safe approximation)
+        bR_iso = (2.0 * m) / max(len(r_stack) - 1, 1)
+        S_R_iso_eff = max(0.0, S_R_iso - bR_iso)
+
+        # bounded raw probability
+        tau_r_iso = 2.0 * bR_iso
+        p_r_iso_raw = S_R_iso_eff / (S_R_iso_eff + tau_r_iso + 1e-12)
+        p_r_iso_raw = float(np.clip(p_r_iso_raw, 0.0, 1.0))
+
+        e_beta_R_iso = p_r_iso_raw
+        e_alpha_R_iso = 1.0 - e_beta_R_iso
+
+        alphas_R *= forget_param
+        alphas_R += np.array([e_alpha_R_iso, e_beta_R_iso])
+        alphas_R = np.clip(alphas_R, 1.0, None)
+
+        r2_dist = sl.DirichletDistribution2d(alphas_R)
+        r_opinion = r2_dist.as_opinion()
+
+        r_op_obj_history.append(r_opinion)
+        # r_e_beta_history.append(e_beta_R_iso)
+
+    else:
+        r_opinion = sl.Opinion(0, 0)
+        r_op_obj_history.append(r_opinion)
+
+    # # ============================================================
+    # # PAPER-BASED Q/R ESTIMATION
+    # # ============================================================
+    # q_paper_opinion = sl.Opinion(0, 0)
+    # r_paper_opinion = sl.Opinion(0, 0)
+    #
+    # if (
+    #     len(filtered_state_buffer) == paper_cfg.N_smooth + 1
+    #     and len(predicted_state_buffer) == paper_cfg.N_smooth
+    #     and len(measurement_buffer) == paper_cfg.N_smooth
+    # ):
+    #     # RTS smoother on the current fixed window
+    #     x_smooth_window, P_smooth_window = rts_smoother_window(
+    #         filtered_states=list(filtered_state_buffer),
+    #         predicted_states=list(predicted_state_buffer),
+    #         F=F_paper,
+    #     )
+    #
+    #     z_window = np.stack(list(measurement_buffer), axis=0)
+    #
+    #     # Reconstruct estimated measurement/process noise sequences
+    #     v_hat_seq, w_hat_seq = estimate_noise_sequences_from_smoothed_states(
+    #         z_window=z_window,
+    #         x_smooth_window=x_smooth_window,
+    #         F=F_paper,
+    #         H=H_paper,
+    #     )
+    #
+    #     # Exact paper weighting factors
+    #     dv, dw = compute_weighting_factors_exact(
+    #         F=F_paper,
+    #         H=H_paper,
+    #         Q=paper_state.Q_est,
+    #         R=paper_state.R_est,
+    #         N=paper_cfg.N_smooth,
+    #         eps=paper_cfg.eps,
+    #     )
+    #
+    #     dv_history_paper.append(dv.copy())
+    #     dw_history_paper.append(dw.copy())
+    #
+    #     upd = update_paper_sums_and_covariances(
+    #         paper_state=paper_state,
+    #         v_hat_seq=v_hat_seq,
+    #         w_hat_seq=w_hat_seq,
+    #         dv=dv,
+    #         dw=dw,
+    #         cfg=paper_cfg,
+    #     )
+    #
+    #     if upd is not None:
+    #         sigma_w2_hat, sigma_v2_hat, Q_hat, R_hat = upd
+    #
+    #         Q_hat_paper_history.append(Q_hat.copy())
+    #         R_hat_paper_history.append(R_hat.copy())
+    #
+    #         # ------------------------------------------------
+    #         # YOUR APPLICATION: diagnostics -> SL opinions
+    #         # ------------------------------------------------
+    #         d_q_paper = covariance_deviation_score(Q_hat, Q_nom, eps=paper_cfg.eps)
+    #         d_r_paper = covariance_deviation_score(R_hat, R_nom, eps=paper_cfg.eps)
+    #
+    #         # use rational mapping to avoid immediate saturation
+    #         p_q_paper = deviation_to_probability_rational(d_q_paper, tau_q_paper_map)
+    #         p_r_paper = deviation_to_probability_rational(d_r_paper, tau_r_paper_map)
+    #
+    #         p_q_paper_history.append(p_q_paper)
+    #         p_r_paper_history.append(p_r_paper)
+    #
+    #         q_paper_alphas = np.array([1.0 + (1.0 - p_q_paper), 1.0 + p_q_paper])
+    #         r_paper_alphas = np.array([1.0 + (1.0 - p_r_paper), 1.0 + p_r_paper])
+    #
+    #         q_paper_dist = sl.DirichletDistribution2d(q_paper_alphas)
+    #         r_paper_dist = sl.DirichletDistribution2d(r_paper_alphas)
+    #
+    #         q_paper_opinion = q_paper_dist.as_opinion()
+    #         r_paper_opinion = r_paper_dist.as_opinion()
+    #
+    # # q_paper_op_obj_history.append(q_paper_opinion)
+    # # r_paper_op_obj_history.append(r_paper_opinion)
+    #
+    # if len(Q_hat_paper_history) > 0:
+    #     last_q_paper = p_q_paper_history[-1]
+    #     last_r_paper = p_r_paper_history[-1]
+    #     # last_q_op = q_paper_op_obj_history[-1]
+    #     # last_r_op = r_paper_op_obj_history[-1]
+    # else:
+    #     last_q_paper = 0.0
+    #     last_r_paper = 0.0
+    #     last_q_op = sl.Opinion(0, 0)
+    #     last_r_op = sl.Opinion(0, 0)
+    #
+    # # if no fresh update was generated this step, repeat last value
+    # if len(p_q_paper_history) < i + 1:
+    #     p_q_paper_history.append(last_q_paper)
+    #     p_r_paper_history.append(last_r_paper)
+    #     # q_paper_op_obj_history.append(last_q_op)
+    #     # r_paper_op_obj_history.append(last_r_op)
+
+
+
+    # Fusion of Opinions
+    fused_kl_ad = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, opinion, ad_opinion)
+    fused_kl_ad_2 = opinion.wb_fuse(ad_opinion) #sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, opinion, ad_opinion)
+    # fused_kl_ad_ks = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, opinion, ad_opinion, ks_opinion)
+    fused_overall_q = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, fused_kl_ad, q_opinion)
+    # fused_weighted = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, ad_opinion, opinion)
+    #assert fused_kl_ad == fused_weighted
+    fused_op_obj_history.append(fused_kl_ad)
+    fused_2_op_obj_history.append(fused_kl_ad_2)
+
+
+    dc = r_opinion.degree_of_conflict(q_opinion)
+    dc_history.append(dc)
+    # # --------------------------------------------------
+    # # Four-hypothesis decision model
+    # # H0  : no fault
+    # # HQ  : Q-only fault
+    # # HR  : R-only fault
+    # # HQR : joint Q+R fault
+    # # --------------------------------------------------
+    #
+    # # projected probability of the FAULT class
+    # p_g = float(fused_kl_ad.getProjection()[1])
+    # p_q_raw = float(q_opinion.getProjection()[1])
+    #
+    # # Q activation: raw Q evidence modulated by nominal system sensitivity
+    # tau_q = 0.12
+    # s_q = w_Q * p_q_raw
+    # a_q = s_q / (s_q + tau_q + 1e-12)
+    #
+    # # R activation: residual global fault mass not explained by Q
+    # p_q_expl = p_g * a_q
+    # p_r_rest = max(0.0, p_g - p_q_expl)
+    #
+    # tau_r = 0.6
+    # s_r = w_R * p_r_rest
+    # a_r = s_r / (s_r + tau_r + 1e-12)
+    #
+    # # four hypothesis masses
+    # pi_0  = max(0.0, 1.0 - p_g)
+    # pi_Q  = p_g * a_q * (1.0 - a_r)
+    # pi_R  = p_g * (1.0 - a_q) * a_r
+    # pi_QR = p_g * a_q * a_r
+    #
+    # # normalize for numerical safety
+    # pi_vec = np.array([pi_0, pi_Q, pi_R, pi_QR], dtype=float)
+    # pi_sum = np.sum(pi_vec)
+    # if pi_sum > 0:
+    #     pi_vec /= pi_sum
+    #
+    # pi_0, pi_Q, pi_R, pi_QR = pi_vec
+    #
+    # decision_labels = ["none", "Q", "R", "Q+R"]
+    # decision_idx = int(np.argmax(pi_vec))
+    # decision = decision_labels[decision_idx]
+    #
+    # pi0_history.append(pi_0)
+    # piQ_history.append(pi_Q)
+    # piR_history.append(pi_R)
+    # piQR_history.append(pi_QR)
+    # decision_history.append(decision)
+
+
+    # # --------------------------------------------------
+    # # Four-hypothesis decision layer
+    # # --------------------------------------------------
+    #
+    # # global fault probability = fault class
+    # p_g = float(fused_kl_ad.getProjection()[1])
+    #
+    # # raw Q/R probabilities = fault class of respective opinions
+    # p_q_raw = float(q_opinion.getProjection()[1])
+    # p_r_raw = float(r_opinion.getProjection()[1])  # falls du jetzt r2_opinion nutzt: hier ersetzen
+    #
+    # # stationary sensitivity weighting
+    # s_q = w_Q * p_q_raw
+    # s_r = w_R * p_r_raw
+    #
+    # # saturating activations
+    # tau_q = 0.15
+    # tau_r = 0.25
+    #
+    # a_q = s_q / (s_q + tau_q + 1e-12)
+    # a_r = s_r / (s_r + tau_r + 1e-12)
+    #
+    # # -------------------------
+    # # attribution within fault space
+    # # -------------------------
+    # u_q = a_q * (1.0 - a_r)
+    # u_r = (1.0 - a_q) * a_r
+    # u_qr = a_q * a_r
+    #
+    # u_sum = u_q + u_r + u_qr
+    #
+    # if u_sum > 0:
+    #     u_q /= u_sum
+    #     u_r /= u_sum
+    #     u_qr /= u_sum
+    # else:
+    #     u_q = 0.0
+    #     u_r = 0.0
+    #     u_qr = 0.0
+    #
+    # # -------------------------
+    # # four hypothesis masses
+    # # -------------------------
+    # pi_0 = max(0.0, 1.0 - p_g)
+    # pi_Q = p_g * u_q
+    # pi_R = p_g * u_r
+    # pi_QR = p_g * u_qr
+    #
+    # pi_vec = np.array([pi_0, pi_Q, pi_R, pi_QR], dtype=float)
+    # pi_vec /= (np.sum(pi_vec) + 1e-12)
+    #
+    # pi_0, pi_Q, pi_R, pi_QR = pi_vec
+    #
+    # decision_labels = ["none", "Q", "R", "Q+R"]
+    # decision_idx = int(np.argmax(pi_vec))
+    # decision = decision_labels[decision_idx]
+    #
+    # # histories
+    # pi0_history.append(pi_0)
+    # piQ_history.append(pi_Q)
+    # piR_history.append(pi_R)
+    # piQR_history.append(pi_QR)
+    # decision_history.append(decision)
+    #
+    # # convenience histories
+    # p_s_history.append(p_g)
+    # p_q_history.append(pi_Q + pi_QR)  # total Q involvement
+    # p_r_history.append(pi_R + pi_QR)  # total R involvement
+
+    # # --------------------------------------------------
+    # # Four-hypothesis decision layer
+    # # --------------------------------------------------
+    #
+    # # global fault probability = fault class
+    # p_g = float(fused_kl_ad.getProjection()[1])
+    #
+    # # raw Q/R probabilities = fault class of respective opinions
+    # p_q_raw = float(q_opinion.getProjection()[1])
+    # p_r_raw = float(r_opinion.getProjection()[1])  # neue R-iso-opinion
+    #
+    # # stationary sensitivity weighting
+    # s_q = w_Q * p_q_raw
+    # s_r = w_R * p_r_raw
+    #
+    # # ---------------------------------
+    # # fair half-activation thresholds
+    # # tau_i = w_i * theta_i
+    # # ---------------------------------
+    # theta_q = 1
+    # theta_r = 1
+    #
+    # tau_q = w_Q * theta_q
+    # tau_r = w_R * theta_r
+    #
+    # a_q = s_q / (s_q + tau_q + 1e-12)
+    # a_r = s_r / (s_r + tau_r + 1e-12)
+    #
+    # # ---------------------------------
+    # # overlap-based attribution
+    # # ---------------------------------
+    # lambda_overlap = 0.5  # 0 -> conservative, 1 -> generous
+    #
+    # u_qr = lambda_overlap * min(a_q, a_r) + (1.0 - lambda_overlap) * (a_q * a_r)
+    # u_q = max(0.0, a_q - u_qr)
+    # u_r = max(0.0, a_r - u_qr)
+    #
+    # u_sum = u_q + u_r + u_qr
+    #
+    # if u_sum > 0:
+    #     u_q /= u_sum
+    #     u_r /= u_sum
+    #     u_qr /= u_sum
+    # else:
+    #     u_q = 0.0
+    #     u_r = 0.0
+    #     u_qr = 0.0
+    #
+    # # ---------------------------------
+    # # four hypothesis masses
+    # # ---------------------------------
+    # pi_0 = max(0.0, 1.0 - p_g)
+    # pi_Q = p_g * u_q
+    # pi_R = p_g * u_r
+    # pi_QR = p_g * u_qr
+    #
+    # pi_vec = np.array([pi_0, pi_Q, pi_R, pi_QR], dtype=float)
+    # pi_vec /= (np.sum(pi_vec) + 1e-12)
+    #
+    # pi_0, pi_Q, pi_R, pi_QR = pi_vec
+    #
+    # decision_labels = ["none", "Q", "R", "Q+R"]
+    # decision_idx = int(np.argmax(pi_vec))
+    # decision = decision_labels[decision_idx]
+    #
+    # # histories
+    # pi0_history.append(pi_0)
+    # piQ_history.append(pi_Q)
+    # piR_history.append(pi_R)
+    # piQR_history.append(pi_QR)
+    # decision_history.append(decision)
+    #
+    # # convenience histories
+    # p_s_history.append(p_g)
+    # p_q_history.append(pi_Q + pi_QR)
+    # p_r_history.append(pi_R + pi_QR)
+
+    # --------------------------------------------------
+    # Four-hypothesis decision layer
+    # analytically parameterized, no GT pre-calibration
+    # --------------------------------------------------
+
+    # global fault probability = fault class
+    p_g = float(fused_kl_ad.getProjection()[1])
+
+    # raw Q/R probabilities = fault class of respective opinions
+    p_q_raw = float(q_opinion.getProjection()[1])
+    p_r_raw = float(r_opinion.getProjection()[1])  # neue R-iso-opinion
+
+    # effective window size for Q-null approximation
+    N_q = max(len(nu_history), 1)
+
+    # ---------------------------------
+    # analytically corrected activations
+    # ---------------------------------
+
+    # Q-channel: subtract theoretical nominal floor
+    p_q0 = 1.0 - np.exp(-1.0 / ((m ** 1.5) * np.sqrt(N_q) + 1e-12))
+    a_q = (p_q_raw - p_q0) / (1.0 - p_q0 + 1e-12)
+    a_q = float(np.clip(a_q, 0.0, 1.0))
+
+    # R-channel: already floor-corrected in the R-iso test
+    # optional tiny safety margin:
+    eps_r = 0.0
+    a_r = (p_r_raw - eps_r) / (1.0 - eps_r + 1e-12)
+    a_r = float(np.clip(a_r, 0.0, 1.0))
+
+    # ---------------------------------
+    # attribution within fault space
+    # stationary sensitivity weighting enters HERE
+    # ---------------------------------
+    u_q = w_Q * a_q * (1.0 - a_r)
+    u_r = w_R * (1.0 - a_q) * a_r
+    u_qr = np.sqrt(w_Q * w_R) * a_q * a_r
+
+    u_sum = u_q + u_r + u_qr
+
+    if u_sum > 0:
+        u_q /= u_sum
+        u_r /= u_sum
+        u_qr /= u_sum
+    else:
+        u_q = 0.0
+        u_r = 0.0
+        u_qr = 0.0
+
+    # ---------------------------------
+    # four hypothesis masses
+    # ---------------------------------
+    pi_0 = max(0.0, 1.0 - p_g)
+    pi_Q = p_g * u_q
+    pi_R = p_g * u_r
+    pi_QR = p_g * u_qr
+
+    pi_vec = np.array([pi_0, pi_Q, pi_R, pi_QR], dtype=float)
+    pi_vec /= (np.sum(pi_vec) + 1e-12)
+
+    pi_0, pi_Q, pi_R, pi_QR = pi_vec
+
+    decision_labels = ["none", "Q", "R", "Q+R"]
+    decision_idx = int(np.argmax(pi_vec))
+    decision = decision_labels[decision_idx]
+
+    # histories
+    pi0_history.append(pi_0)
+    piQ_history.append(pi_Q)
+    piR_history.append(pi_R)
+    piQR_history.append(pi_QR)
+    decision_history.append(decision)
+
+    # convenience histories
+    p_s_history.append(p_g)
+    p_q_history.append(pi_Q + pi_QR)
+    p_r_history.append(pi_R + pi_QR)
+
+print("Q_hat_paper_history:", Q_hat_paper_history)
+print("R_hat_paper_history:", R_hat_paper_history)
+print("p_q_paper_history:", p_q_paper_history)
+print("p_r_paper_history:", p_r_paper_history)
+
+
+# plt.plot(list(range(len(cum_u))), cum_u)
+# plt.title("cum_u")
+# plt.figure()
+# plt.plot(list(range(len(C_history))), C_history)
+# plt.title("C_history")
+# plt.figure()
+# plt.bar(range(M), counts)
+# plt.title("Bin counts")
+plt.figure()
+plt.plot(p_q_paper_history, label="P Q")
+plt.plot(p_r_paper_history, label="P R")
+plt.legend()
+plt.title("paper stats")
+# plt.figure()
+# plt.plot(list(range(len(kl_kde_history))), kl_kde_history)
+# plt.title("kl_kde_history")
+# plt.figure()
+# plt.plot(belief_history, label="Belief KL")
+# # plt.plot(disbelief_history, label="Disbelief")
+# plt.plot(uncertainty_history, label="Uncertainty KL")
+# plt.plot(ad_belief_history, label="Belief AD")
+# plt.plot(ad_uncertainty_history, label="Uncertainty AD")
+# plt.title("Opinion comparison")
+# plt.legend()
+plt.figure()
+plt.plot(dc_history, label="Degree of Conflict (global vs Q)")
+plt.plot(p_s_history, label="Projection (global)")
+plt.plot(p_r_history, label="Projection (R)")
+plt.plot(p_q_history, label="Projection (Q)")
+plt.title("Projection comparison")
+plt.legend()
+plt.figure()
+plt.plot(decision_history, label="Decision history")
+plt.legend()
+plt.title("Hypotheses decision")
+plt.figure()
+plt.plot(pi0_history, label="Pi 0")
+plt.plot(piQ_history, label="Pi Q")
+plt.plot(piR_history, label="Pi R")
+plt.plot(piQR_history, label="Pi QR")
+plt.legend()
+plt.title("Pi comparison")
+# def compute_ema(data, alpha=0.1):
+#     ema = []
+#     prev = data[0]  # Initialwert
+#     for x in data:
+#         prev = alpha * x + (1 - alpha) * prev
+#         ema.append(prev)
+#     return ema
+#
+# alpha = 0.1  # oder z.B. 0.05 für stärkere Glättung
+#
+# ema_pi0  = compute_ema(pi0_history, alpha)
+# ema_piQ  = compute_ema(piQ_history, alpha)
+# ema_piR  = compute_ema(piR_history, alpha)
+# ema_piQR = compute_ema(piQR_history, alpha)
+#
+# plt.figure()
+# plt.plot(ema_pi0,  label="EMA Pi 0")
+# plt.plot(ema_piQ,  label="EMA Pi Q")
+# plt.plot(ema_piR,  label="EMA Pi R")
+# plt.plot(ema_piQR, label="EMA Pi QR")
+#
+# plt.legend()
+# plt.title("Pi comparison with EMA")
+#
+# plt.figure()
+# ema_p_s = compute_ema(p_s_history, alpha)
+# ema_p_q = compute_ema(p_q_history, alpha)
+# ema_p_r = compute_ema(p_r_history, alpha)
+# ema_dc = compute_ema(dc_history, alpha)
+# plt.plot(ema_dc, label="EMA DC history")
+# plt.plot(ema_p_s, label="EMA P global")
+# plt.plot(ema_p_q, label="EMA P Q")
+# plt.plot(ema_p_r, label="EMA P R")
+# plt.legend()
+# plt.title("EMA P comparison")
+
+# plt.figure()
+# plt.plot(kl_C_history, label="C (KL method)")
+# plt.plot(ks_history, label="KS statistic")
+# plt.plot(ad_history, label="AD statistic")
+# plt.plot([0, len(ad_history)-1], [0.05, 0.05], 'r--')
+# # plt.plot(cvm_history, label="CvM statistic")
+# plt.legend()
+# plt.title("Uniformity tests (statistics)")
+#
+# plt.figure()
+# plt.plot(e_beta_history, label="KL")
+# plt.plot(ad_e_beta_history, label="AD")
+# # plt.plot(ks_e_beta_history, label="KS")
+# plt.plot(q_e_beta_history, label="Q")
+# plt.plot(q2_e_beta_history, label="Q2")
+# plt.legend()
+# plt.title("Comparison test-based Beta evidence")
+
+# plt.figure()
+# plt.plot(process_noise_coeff_memory[0], label="Process noise")
+# plt.plot(meas_std_dev_memory[0][0][0], label="Meas standard deviation")
+# plt.legend()
+# plt.title("Disturbances")
+# %%
+# Plot the resulting track, including uncertainty ellipses
+plotter.plot_tracks(track, [0, 2], uncertainty=True)
+# plotter.fig.show(renderer="browser")
+# plotter.show()
+# plt.show()
+
+from aduulm_scripts.utils.plotting import plot_selfassessment_with_nis
+
+
+fig = plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
+                             assessor_type='KalmanSelfAssessor')
+
+# plotter.fig.show(renderer="browser")
+# import sys
+# sys.exit(0)
+# %%
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+
+fig = plotter.fig
+
+fig.set_subplots(
+    rows=3, cols=3,
+    specs=[
+        [{"colspan": 2}, None, {"type": "ternary"}],   # Zeile 1: Track
+        [{"type": "ternary"}, {"type": "xy"}, {"type": "xy"}],  # Zeile 2
+        [{"type": "ternary"}, None, {"type": "ternary"}]  # optional frei
+    ],
+    vertical_spacing=0.05,
+    horizontal_spacing=0.1
+)
+
+for trace in fig.data:
+    trace.update(xaxis="x1", yaxis="y1")
+
+b0_f, d0_f, u0_f = fused_op_obj_history[0].belief(), fused_op_obj_history[0].disbelief(), fused_op_obj_history[0].uncertainty()
+b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u0_f, u0_f2], b=[d0_f, d0_f2], c=[b0_f, b0_f2],
+        mode='markers',
+        marker=dict(size=[14, 14], color=['purple', 'cyan']),
+        hovertemplate=["F1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "F2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="Constraint Fusion"
+    ),
+    row=1, col=3
+)
+
+prior = 0.5  # oder: opinion.prior_belief_masses[0]
+
+P0 = b0_f + prior * u0_f
+
+fig.add_trace(
+    go.Scatterternary(
+        a=[0],
+        b=[1 - P0],
+        c=[P0],
+        mode='markers',
+        marker=dict(size=10, color='green'),
+        name='Projected Probability',
+        hovertemplate="P: %{c:.2f}<extra></extra>"
+    ),
+    row=1, col=3
+)
+
+fig.add_trace(
+    go.Scatterternary(
+                a=[u0_f, 0],
+                b=[d0_f, 1 - P0],
+                c=[b0_f, P0],
+                mode='lines',
+                line=dict(color='green', dash='dot'),
+                showlegend=False
+            ),
+    row=1, col=3
+)
+
+b0, d0, u0 = opinions[0]
+# b0_ks, d0_ks, u0_ks = ks_op_obj_history[0].belief(), ks_op_obj_history[0].disbelief(), ks_op_obj_history[0].uncertainty()
+b0_ad, d0_ad, u0_ad = opinions_ad[0]
+fig.add_trace(
+    go.Scatterternary(
+        a=[u0, u0_ad], b=[d0, d0_ad], c=[b0, b0_ad],
+        mode='markers',
+        marker=dict(size=14, color=['cyan', 'yellow']),
+        hovertemplate=["KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
+    ),
+    row=2, col=1
+)
+
+
+
+fig.add_trace(
+    go.Scatter(
+        x=x_pdf,
+        y=dirichlet_pdfs[0],
+        mode='lines',
+        line=dict(color='blue'),
+        name='Beta'
+    ),
+    row=2, col=2
+)
+
+
+fig.add_trace(
+    go.Bar(
+        x=list(range(M)),
+        y=counts_history[0],
+        name="Bin counts"
+    ),
+    row=2, col=3
+)
+b0, d0, u0 = q_op_obj_history[0].belief(), q_op_obj_history[0].disbelief(), q_op_obj_history[0].uncertainty()
+b0_r, d0_r, u0_r = r_op_obj_history[0].belief(), r_op_obj_history[0].disbelief(), r_op_obj_history[0].uncertainty()
+# b0_q2, d0_q2, u0_q2 = q2_op_obj_history[0].belief(), q2_op_obj_history[0].disbelief(), q2_op_obj_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u0, u0_r], #, u0_q2],
+        b=[d0, d0_r], #, d0_q2],
+        c=[b0, b0_r], #, b0_q2],
+        mode='markers',
+        #subplot="ternary",
+        marker=dict(size=14, color=['red', 'blue', 'purple']),
+        hovertemplate=["Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Q2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
+    ),
+    row=3, col=1
+)
+
+b0_pq, d0_pq, u0_pq = q_paper_op_obj_history[0].belief(), q_paper_op_obj_history[0].disbelief(), q_paper_op_obj_history[0].uncertainty()
+b0_pr, d0_pr, u0_pr = r_paper_op_obj_history[0].belief(), r_paper_op_obj_history[0].disbelief(), r_paper_op_obj_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u0_pq, u0_pr], b=[d0_pq, d0_pr], c=[b0_pq, b0_pr],
+        mode='markers',
+        marker=dict(size=[14, 14], color=['red', 'blue']),
+        hovertemplate=["Paper Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Paper R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="Constraint Fusion"
+    ),
+    row=3, col=3
+)
+
+n_base = len(fig.data)
+# print(n_base)
+idx_opinion     = len(fig.data) - 6
+idx_beta        = len(fig.data) - 5
+idx_proj        = len(fig.data) - 4
+idx_line        = len(fig.data) - 3
+idx_hist        = len(fig.data) - 2
+idx_opinion_ad  = len(fig.data) - 1
+new_frames = []
+
+
+for i, frame in enumerate(fig.frames):
+    frame.name = str(i)
+    b_f, d_f, u_f = fused_op_obj_history[i].belief(), fused_op_obj_history[i].disbelief(), fused_op_obj_history[
+        i].uncertainty()
+    b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
+    # b_ks, d_ks, u_ks = b0_ks, d0_ks, u0_ks#ks_op_obj_history[i].belief(), ks_op_obj_history[i].disbelief(), ks_op_obj_history[i].uncertainty()
+    b_q, d_q, u_q = q_op_obj_history[i].belief(), q_op_obj_history[i].disbelief(), q_op_obj_history[i].uncertainty()
+    # b_q2, d_q2, u_q2 = q2_op_obj_history[i].belief(), q2_op_obj_history[i].disbelief(), q2_op_obj_history[i].uncertainty()
+    b_r, d_r, u_r = r_op_obj_history[i].belief(), r_op_obj_history[i].disbelief(), r_op_obj_history[i].uncertainty()
+    b, d, u = opinions[i]
+    b_ad, d_ad, u_ad = opinions_ad[i]
+    y_i = dirichlet_pdfs[i]
+    P = b_f + prior * u_f
+    counts_i = counts_history[i]
+    # counts_R_i = counts_R_history[i]
+
+    b_pq, d_pq, u_pq = q_paper_op_obj_history[i].belief(), q_paper_op_obj_history[i].disbelief(), \
+    q_paper_op_obj_history[i].uncertainty()
+    b_pr, d_pr, u_pr = r_paper_op_obj_history[i].belief(), r_paper_op_obj_history[i].disbelief(), \
+    r_paper_op_obj_history[i].uncertainty()
+
+    # Bestehende Daten behalten + erweitern
+    new_data = list(frame.data)
+
+    new_data.append(
+        go.Scatterternary(a=[u_f, u_f2], b=[d_f, d_f2], c=[b_f, b_f2], cliponaxis=False)
+    )
+
+    new_data.append(go.Scatterternary(a=[0], b=[1 - P], c=[P], cliponaxis=False))
+
+    new_data.append(
+        go.Scatterternary(a=[u_f, 0], b=[d_f, 1 - P], c=[b_f, P], mode='lines', line=dict(color='green', dash='dot'),
+                          showlegend=False, cliponaxis=False))
+
+    new_data.append(
+        go.Scatterternary(a=[u, u_ad], b=[d, d_ad], c=[b, b_ad], cliponaxis=False)
+    )
+
+    new_data.append(
+        go.Scatter(x=x_pdf, y=y_i)
+    )
+
+
+
+    new_data.append( go.Bar( x=list(range(M)), y=counts_i ) )
+
+    new_data.append(
+        go.Scatterternary(a=[u_q, u_r], #, u_q2],
+                          b=[d_q, d_r], #, d_q2],
+                          c=[b_q, b_r], #, b_q2])
+                          cliponaxis=False,
+                          )
+    )
+
+
+    new_data.append(
+        go.Scatterternary(a=[u_pq, u_pr], b=[d_pq, d_pr], c=[b_pq, b_pr], cliponaxis=False)
+    )
+
+    # new_data.append(go.Bar(x=list(range(M)), y=counts_R_i))
+
+    new_frames.append(go.Frame(data=new_data, name=frame.name))
+
+fig.frames = new_frames
+
+# fig.update_xaxes(title_text="Bin", row=2, col=3)
+# fig.update_yaxes(title_text="Count", row=2, col=3)
+sliders = [dict(
+    steps=[
+        dict(
+            method='animate',
+            args=[[str(i)],
+                  dict(mode='immediate',
+                       frame=dict(duration=1000, redraw=True),
+                       transition=dict(duration=0))],
+            label=str(i)
+        )
+        for i in range(len(fig.frames))
+    ],
+    currentvalue=dict(prefix="Step: "),
+    pad=dict(t=30),
+)]
+
+fig.update_layout(sliders=sliders)
+
+fig.update_layout(
+    height=1100,
+
+    ternary=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)',  showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)',  showticklabels=False),
+
+    ),
+    ternary2=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)',  showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)',  showticklabels=False),
+
+    ),
+    ternary3=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+    ),
+    ternary4=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+    )
+
+)
+
+plotter.fig.show(renderer="browser")
+plotter.show()
+plt.show()

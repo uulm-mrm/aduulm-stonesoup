@@ -347,13 +347,12 @@ for measurement in measurements:
     post = updater.update(hypothesis)
     track.append(post)
     prior = track[-1]
-
 # %%
 # Plot the resulting track, including uncertainty ellipses
 
 
 plotter.plot_tracks(track, [0, 2], uncertainty=True)
-plotter.fig
+plotter.fig.show()
 
 
 # %%
