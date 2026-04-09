@@ -199,6 +199,7 @@ updater = KalmanUpdater(measurement_model)
 # We're now ready to construct a self-assessor to monitor the assumptions of the Kalman filter.
 
 from stonesoup.selfassessor.kalman_selfassessor import KalmanSelfAssessor
+from stonesoup.subjective_logic.subjective_logic import BiOpinion, fusion_weighted_belief
 # Self-assessor settings
 sa_settings = {
     "num_X": 7,
@@ -540,144 +541,107 @@ def covariance_deviation_score(C_hat: np.ndarray, C_nom: np.ndarray, eps: float 
 
 def deviation_to_probability_rational(d: float, tau: float) -> float:
     return float(np.clip(d / (d + tau + 1e-12), 0.0, 1.0))
-# # %%
-# # ============================================================
-# # Paper-based AKF covariance estimation helpers
-# # ============================================================
-#
-# @dataclass
-# class PaperAKFConfig:
-#     N_smooth: int = 10      # smoothing horizon N
-#     L_update: int = 5       # number of smoother windows before covariance update
-#     eps: float = 1e-9
-#     opinion_gamma_q: float = 3.0
-#     opinion_gamma_r: float = 3.0
-#
-#
-# @dataclass
-# class PaperAKFState:
-#     Q_est: np.ndarray
-#     R_est: np.ndarray
-#     SSV: np.ndarray
-#     SSW: np.ndarray
-#     l_count: int = 0
-#
-#
-# def init_paper_akf_state(Q0: np.ndarray, R0: np.ndarray) -> PaperAKFState:
-#     return PaperAKFState(
-#         Q_est=Q0.copy(),
-#         R_est=R0.copy(),
-#         SSV=np.zeros(Q0.shape[0], dtype=float),   # process noise components
-#         SSW=np.zeros(R0.shape[0], dtype=float),   # measurement noise components
-#     )
-#
-#
-# def estimate_noise_sequences_from_smoothed_states(
-#     z_window: np.ndarray,
-#     x_smooth_window: np.ndarray,
-#     F: np.ndarray,
-#     H: np.ndarray,
-# ):
-#     """
-#     Paper formulas:
-#         v_{k-i|k} = z_{k-i} - H x_{k-i|k}
-#         w_{k-i|k} = x_{k-i|k} - F x_{k-i-1|k}
-#     """
-#     # x_smooth_window shape: (N+1, n_x)
-#     # z_window shape:        (N,   n_z)
-#
-#     v_hat_seq = z_window - (H @ x_smooth_window[1:].T).T
-#     Fx_prev = (F @ x_smooth_window[:-1].T).T
-#     w_hat_seq = x_smooth_window[1:] - Fx_prev
-#
-#     return v_hat_seq, w_hat_seq
-#
-#
-# def accumulate_paper_sums(
-#     paper_state: PaperAKFState,
-#     v_hat_seq: np.ndarray,
-#     w_hat_seq: np.ndarray,
-# ):
-#     # measurement-noise sum of squares
-#     paper_state.SSW += np.sum(v_hat_seq ** 2, axis=0)
-#     # process-noise sum of squares
-#     paper_state.SSV += np.sum(w_hat_seq ** 2, axis=0)
-#     paper_state.l_count += 1
-#
-#
-# def update_paper_covariances(
-#     paper_state: PaperAKFState,
-#     dv: np.ndarray,
-#     dw: np.ndarray,
-#     L_update: int,
-#     eps: float = 1e-9,
-# ):
-#     """
-#     Paper formulas:
-#         sigma_v^2 = SSV / (d_v * L)
-#         sigma_w^2 = SSW / (d_w * L)
-#     """
-#     sigma_w2_hat = paper_state.SSV / np.maximum(dw * L_update, eps)
-#     sigma_v2_hat = paper_state.SSW / np.maximum(dv * L_update, eps)
-#
-#     sigma_w2_hat = np.maximum(sigma_w2_hat, eps)
-#     sigma_v2_hat = np.maximum(sigma_v2_hat, eps)
-#
-#     paper_state.Q_est = np.diag(sigma_w2_hat)
-#     paper_state.R_est = np.diag(sigma_v2_hat)
-#
-#     paper_state.SSV[:] = 0.0
-#     paper_state.SSW[:] = 0.0
-#     paper_state.l_count = 0
-#
-#     return sigma_w2_hat, sigma_v2_hat, paper_state.Q_est.copy(), paper_state.R_est.copy()
-#
-#
-# def covariance_deviation_score(C_hat: np.ndarray, C_nom: np.ndarray, eps: float = 1e-12) -> float:
-#     num = np.linalg.norm(C_hat - C_nom, ord="fro")
-#     den = np.linalg.norm(C_nom, ord="fro") + eps
-#     return float(num / den)
-#
-#
-# def deviation_to_probability(d: float, gamma: float) -> float:
-#     p = 1.0 - np.exp(-gamma * max(d, 0.0))
-#     return float(np.clip(p, 0.0, 1.0))
-#
-# # ============================================================
-# # User hooks to implement/replace
-# # ============================================================
-#
-# def run_fixed_interval_smoother_stub(filtered_track_window):
-#     """
-#     PLACEHOLDER.
-#     Muss geglättete Zustände x_{k-N|k}, ..., x_{k|k} liefern.
-#
-#     Erwartete Rückgabe:
-#         np.ndarray of shape (N+1, 4)
-#     """
-#     # --- TEMPORARY FALLBACK ---
-#     # Not a true smoother. Only a placeholder so the code structure is clear.
-#     x_smooth_window = np.stack(
-#         [np.asarray(state.state_vector).reshape(-1) for state in filtered_track_window],
-#         axis=0
-#     )
-#     return x_smooth_window
-#
-#
-# def compute_weighting_factors_stub(R: np.ndarray, Q: np.ndarray, n_x: int, n_z: int):
-#     """
-#     PLACEHOLDER.
-#     Paper requires weighting factors dv and dw.
-#     Replace with the exact formulas / numerical implementation from the paper.
-#
-#     Returns:
-#         dv: shape (n_z,)
-#         dw: shape (n_x,)
-#     """
-#     # Conservative placeholder: ones
-#     dv = np.ones(n_z, dtype=float)
-#     dw = np.ones(n_x, dtype=float)
-#     return dv, dw
+
+def clip01(x):
+    return float(np.clip(x, 0.0, 1.0))
+
+
+def make_opinion_from_probability(p_fault, alpha_vec, forget=0.9):
+    """
+    p_fault in [0,1]
+    alpha_vec = np.array([alpha_ok, alpha_fault])
+    returns: opinion_max, updated_alpha_vec
+    """
+    p_fault = clip01(p_fault)
+    e_beta = p_fault
+    e_alpha = 1.0 - p_fault
+
+    alpha_vec *= forget
+    alpha_vec += np.array([e_alpha, e_beta], dtype=float)
+    alpha_vec = np.maximum(alpha_vec, 1.0)
+
+    dist = sl.DirichletDistribution2d(alpha_vec)
+    op = dist.as_opinion()
+
+    projected = op.getProjection()
+    u_max = min(
+        projected[0] / op.prior_belief_masses[0],
+        projected[1] / op.prior_belief_masses[1]
+    )
+    b_max = projected[0] - op.prior_belief_masses[0] * u_max
+    d_max = projected[1] - op.prior_belief_masses[1] * u_max
+    op_max = sl.Opinion(b_max, d_max)
+
+    return op_max, alpha_vec
+
+
+def lag1_corr(X):
+    """
+    X shape: (N, d)
+    """
+    if len(X) < 3:
+        return 0.0
+    x0 = X[:-1]
+    x1 = X[1:]
+    num = np.sum(x0 * x1)
+    den = np.sqrt(np.sum(x0 * x0) * np.sum(x1 * x1)) + 1e-12
+    return float(num / den)
+
+
+def portmanteau_lite(X, max_lag=5):
+    """
+    Simple whiteness score based on lag correlations.
+    X shape: (N, d)
+    """
+    N = len(X)
+    if N < max_lag + 2:
+        return 0.0
+
+    Xc = X - np.mean(X, axis=0, keepdims=True)
+    Q = 0.0
+    for lag in range(1, max_lag + 1):
+        x0 = Xc[:-lag]
+        x1 = Xc[lag:]
+        num = np.sum(x0 * x1)
+        den = np.sqrt(np.sum(x0 * x0) * np.sum(x1 * x1)) + 1e-12
+        rlag = num / den
+        Q += rlag ** 2
+    return float(Q)
+
+
+def cov_mismatch_score(X, target_cov=None):
+    """
+    X shape: (N, d)
+    """
+    if len(X) < 3:
+        return 0.0
+    C = np.cov(X, rowvar=False)
+    d = C.shape[0]
+    if target_cov is None:
+        target_cov = np.eye(d)
+    return float(np.linalg.norm(C - target_cov, ord="fro") /
+                 (np.linalg.norm(target_cov, ord="fro") + 1e-12))
+
+
+def mean_shift_score(X):
+    """
+    X shape: (N, d)
+    """
+    if len(X) < 3:
+        return 0.0
+    mu = np.mean(X, axis=0)
+    return float(np.linalg.norm(mu))
+
+
+def cusum_lite_score(X):
+    """
+    X shape: (N, d)
+    """
+    if len(X) < 3:
+        return 0.0
+    Xc = X - np.mean(X, axis=0, keepdims=True)
+    S = np.cumsum(Xc, axis=0)
+    return float(np.max(np.linalg.norm(S, axis=1)) / np.sqrt(len(X)))
 # %%
 from stonesoup.types.state import GaussianState
 prior = GaussianState([[0], [1], [0], [1]], np.diag([.5, 0.1, .5, 0.1]), timestamp=start_time)
@@ -705,6 +669,15 @@ q_alphas = np.array([1.0, 1.0])
 q2_alphas = np.array([1.0, 1.0])
 ks_alphas = np.array([1.0, 1.0])
 alphas_R = np.array([1.0, 1.0])
+
+# -----------------------------
+# New hypothesis-specific alpha states
+# -----------------------------
+h1_r_alphas = np.array([1.0, 1.0])     # H1: R false
+h2_q_alphas = np.array([1.0, 1.0])     # H2: Q / dynamics false
+h4_bias_alphas = np.array([1.0, 1.0])  # H4: bias / mean shift
+h5_white_alphas = np.array([1.0, 1.0]) # H5: lack of whiteness
+
 m = len(measurement_model.mapping)
 assert m == 2
 evidence_per_step = 1.0
@@ -769,6 +742,22 @@ q2_e_beta_history = []
 q_comb_e_beta_history = []
 q2_op_obj_history = []
 
+# -----------------------------
+# New hypothesis opinion histories
+# -----------------------------
+h1_r_op_history = []
+h2_q_op_history = []
+h3_ng_op_history = []
+h4_bias_op_history = []
+h5_white_op_history = []
+global_op_history = []
+
+# optional score histories
+h1_r_score_history = []
+h2_q_score_history = []
+h4_bias_score_history = []
+h5_white_score_history = []
+
 pi0_history = []
 piQ_history = []
 piR_history = []
@@ -777,53 +766,9 @@ decision_history = []
 
 kl_tests_history= []
 
-# stationary = compute_stationary_kf_quantities(
-#     transition_model=stationary_transition_model,
-#     measurement_model=stationary_measurement_model,
-#     prior=prior
-# )
-#
-# K_inf = stationary["K_inf"]
-# P_inf = stationary["P_inf"]
-# S_inf = stationary["S_inf"]
-# Sigma_eta_inf = stationary["Sigma_eta_inf"]
-# R_inv = stationary["R_inv"]
-# mu_R_nom = stationary["mu_R"]
-# sigma_R_nom = stationary["sigma_R"]
-#
-# print("K_inf:\n", K_inf)
-# print("P_inf:\n", P_inf)
-# print("mu_R_nom:", mu_R_nom)
-# print("sigma_R_nom:", sigma_R_nom)
-#
-# H_inf = measurement_model.matrix()
-# R_inf = measurement_model.covar()
-#
-# S_q_inf = H_inf @ P_inf @ H_inf.T
-#
-# w_R = np.trace(np.linalg.solve(S_inf, R_inf)) / m
-# w_Q = np.trace(np.linalg.solve(S_inf, S_q_inf)) / m
 w_R = 0.45
 w_Q = 0.55
-#
-# print("w_Q =", w_Q)
-# print("w_R =", w_R)
-# print("w_Q + w_R =", w_Q + w_R)
-#
-# # ---------------------------------
-# # Q/R signature parameters
-# # ---------------------------------
-# L_q = 3
-# lambda_rq = 0.5   # stronger suppression of Q leakage into R
-# c_q = 2.0
-# c_r = 2.0
-#
-# sq_history = []
-# sr0_history = []
-# sr_history = []
-# pq_raw_history = []
-# pr_raw_history = []
-#
+
 # # ============================================================
 # # Paper-based covariance estimation setup
 # # ============================================================
@@ -835,16 +780,16 @@ paper_cfg = PaperAKFConfig(
     gamma_q=1.0,
     gamma_r=1.0,
 )
-#
-# # nominal covariances for diagnosis
-# dt = timedelta(seconds=1)
-# F_paper = np.asarray(stationary_transition_model.matrix(time_interval=dt), dtype=float)
-# Q_nom = np.asarray(stationary_transition_model.covar(time_interval=dt), dtype=float)
-# H_paper = np.asarray(stationary_measurement_model.matrix(), dtype=float)
-# R_nom = np.asarray(stationary_measurement_model.covar(), dtype=float)
-#
-# paper_state = init_paper_akf_state(Q0=Q_nom, R0=R_nom)
-#
+
+# nominal covariances for diagnosis
+dt = timedelta(seconds=1)
+F_paper = np.asarray(stationary_transition_model.matrix(time_interval=dt), dtype=float)
+Q_nom = np.asarray(stationary_transition_model.covar(time_interval=dt), dtype=float)
+H_paper = np.asarray(stationary_measurement_model.matrix(), dtype=float)
+R_nom = np.asarray(stationary_measurement_model.covar(), dtype=float)
+
+paper_state = init_paper_akf_state(Q0=Q_nom, R0=R_nom)
+
 filtered_state_buffer = deque(maxlen=paper_cfg.N_smooth + 1)
 predicted_state_buffer = deque(maxlen=paper_cfg.N_smooth)
 measurement_buffer = deque(maxlen=paper_cfg.N_smooth)
@@ -925,6 +870,58 @@ for i, measurement in enumerate(measurements):
     if len(nu_history) > max_buffer:
         nu_history.pop(0)
 
+    # ---------------------------------
+    # H5: lack of whiteness / temporal correlation
+    # ---------------------------------
+    if len(nu_history) >= 8:
+        nu_stack_h5 = np.stack(nu_history, axis=0)
+        nu_stack_h5 = nu_stack_h5 - np.mean(nu_stack_h5, axis=0, keepdims=True)
+
+        Sigma_h5 = np.cov(nu_stack_h5, rowvar=False)
+        Sigma_h5 += 1e-6 * np.eye(Sigma_h5.shape[0])
+
+        try:
+            L_h5 = np.linalg.cholesky(Sigma_h5)
+            L_h5_inv = np.linalg.inv(L_h5)
+            nu_rewhite_h5 = (L_h5_inv @ nu_stack_h5.T).T
+        except np.linalg.LinAlgError:
+            nu_rewhite_h5 = nu_stack_h5
+
+        rho1_h5 = abs(lag1_corr(nu_rewhite_h5))
+        port_h5 = portmanteau_lite(nu_rewhite_h5, max_lag=5)
+
+        score_h5 = 0.5 * deviation_to_probability_rational(rho1_h5, tau=0.08) + \
+                   0.5 * deviation_to_probability_rational(port_h5, tau=0.5)
+
+        h5_white_score_history.append(score_h5)
+        h5_opinion, h5_white_alphas = make_opinion_from_probability(
+            score_h5, h5_white_alphas, forget=forget_param
+        )
+    else:
+        h5_opinion = sl.Opinion(0, 0)
+
+    h5_white_op_history.append(h5_opinion)
+
+    # ---------------------------------
+    # H4: bias / mean shift
+    # ---------------------------------
+    if len(nu_history) >= 8:
+        nu_stack_h4 = np.stack(nu_history, axis=0)
+
+        score_mean = deviation_to_probability_rational(mean_shift_score(nu_stack_h4), tau=0.12)
+        score_cusum = deviation_to_probability_rational(cusum_lite_score(nu_stack_h4), tau=0.5)
+
+        score_h4 = 0.5 * score_mean + 0.5 * score_cusum
+
+        h4_bias_score_history.append(score_h4)
+        h4_opinion, h4_bias_alphas = make_opinion_from_probability(
+            score_h4, h4_bias_alphas, forget=forget_param
+        )
+    else:
+        h4_opinion = sl.Opinion(0, 0)
+
+    h4_bias_op_history.append(h4_opinion)
+
     # OLD Q-TEST
     rho = 0
     if len(nu_history) >= 5:
@@ -978,6 +975,8 @@ for i, measurement in enumerate(measurements):
     else:
         q_opinion = sl.Opinion(0, 0)
         q_op_obj_history.append(q_opinion)
+    # current q_opinion is treated as an auxiliary whiteness opinion, not as H2
+    aux_temporal_opinion = q_opinion
 
 
     d2 = (delta.T @ np.linalg.inv(S) @ delta).item()
@@ -1199,6 +1198,81 @@ for i, measurement in enumerate(measurements):
         r_opinion = sl.Opinion(0, 0)
         r_op_obj_history.append(r_opinion)
 
+    # ---------------------------------
+    # H1: measurement noise covariance R wrong
+    # combine existing R-ISO with post-fit residual covariance mismatch
+    # ---------------------------------
+    H = measurement_model.matrix()
+    eta = measurement.state_vector.reshape(-1, 1) - H @ post.state_vector
+    eta = eta.flatten()
+
+    u_r_buffer.append(eta)
+    if len(u_r_buffer) > max_buffer:
+        u_r_buffer.pop(0)
+
+    if len(u_r_buffer) >= 8:
+        eta_stack = np.stack(u_r_buffer, axis=0)
+        eta_stack = eta_stack - np.mean(eta_stack, axis=0, keepdims=True)
+
+        score_eta = deviation_to_probability_rational(
+            cov_mismatch_score(eta_stack, Sigma_eta_nom),
+            tau=0.20
+        )
+
+        # r_opinion comes from your existing R-ISO block
+        score_r_iso = float(r_opinion.getProjection()[1])
+
+        score_h1 = 0.5 * score_r_iso + 0.5 * score_eta
+
+        h1_r_score_history.append(score_h1)
+        h1_opinion, h1_r_alphas = make_opinion_from_probability(
+            score_h1, h1_r_alphas, forget=forget_param
+        )
+    else:
+        h1_opinion = sl.Opinion(0, 0)
+
+    h1_r_op_history.append(h1_opinion)
+
+    # ---------------------------------
+    # H2: process noise / dynamics mismatch (Q wrong)
+    # simple version: multi-step prediction symptom + update effort
+    # ---------------------------------
+    dx_update = (post.state_vector - prediction.state_vector).reshape(-1)
+    update_effort = np.linalg.norm(dx_update)
+
+    if len(filtered_state_buffer) == paper_cfg.N_smooth + 1 and len(measurement_buffer) == paper_cfg.N_smooth:
+        z_window = np.stack(measurement_buffer, axis=0)
+
+        # use current filtered/predicted state sequence for a simple smoothed-noise proxy
+        x_smooth_window, _ = rts_smoother_window(
+            list(filtered_state_buffer),
+            list(predicted_state_buffer),
+            F_paper
+        )
+
+        _, w_hat_seq = estimate_noise_sequences_from_smoothed_states(
+            z_window=z_window,
+            x_smooth_window=x_smooth_window,
+            F=F_paper,
+            H=H_paper
+        )
+
+        score_w = deviation_to_probability_rational(
+            cov_mismatch_score(w_hat_seq, Q_nom),
+            tau=0.25
+        )
+    else:
+        score_w = 0.0
+
+    score_update = deviation_to_probability_rational(update_effort, tau=0.5)
+    score_h2 = 0.7 * score_w + 0.3 * score_update
+
+    h2_q_score_history.append(score_h2)
+    h2_opinion, h2_q_alphas = make_opinion_from_probability(
+        score_h2, h2_q_alphas, forget=forget_param
+    )
+    h2_q_op_history.append(h2_opinion)
+
     # # ============================================================
     # # PAPER-BASED Q/R ESTIMATION
     # # ============================================================
@@ -1301,18 +1375,51 @@ for i, measurement in enumerate(measurements):
 
 
     # Fusion of Opinions
-    fused_kl_ad = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, opinion, ad_opinion)
-    fused_kl_ad_2 = opinion.wb_fuse(ad_opinion) #sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, opinion, ad_opinion)
-    # fused_kl_ad_ks = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, opinion, ad_opinion, ks_opinion)
-    fused_overall_q = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, fused_kl_ad, q_opinion)
-    # fused_weighted = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, ad_opinion, opinion)
-    #assert fused_kl_ad == fused_weighted
-    fused_op_obj_history.append(fused_kl_ad)
-    fused_2_op_obj_history.append(fused_kl_ad_2)
+    # fused_kl_ad = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, opinion, ad_opinion)
+    # fused_kl_ad_2 = opinion.wb_fuse(ad_opinion) #sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, opinion, ad_opinion)
+    # fused_overall_q = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, fused_kl_ad, q_opinion)
+    # fused_op_obj_history.append(fused_kl_ad)
+    # fused_2_op_obj_history.append(fused_kl_ad_2)
 
+    # ---------------------------------
+    # H3: non-Gaussian innovation statistics
+    # ---------------------------------
+    h3_opinion = sl.Fusion.fuse_opinions(
+        sl.FusionType.AVERAGE,
+        opinion,
+        ad_opinion
+    )
+    h3_ng_op_history.append(h3_opinion)
 
-    dc = r_opinion.degree_of_conflict(q_opinion)
+    fused_op_obj_history.append(h3_opinion)   # optional: keep old history for plotting
+
+    # ---------------------------------
+    # Global opinion from five hypotheses
+    # ---------------------------------
+    # global_opinion = sl.Fusion.fuse_opinions(
+    #     sl.FusionType.AVERAGE,
+    #     h1_opinion,   # H1: R wrong
+    #     h2_opinion,   # H2: Q / dynamics wrong
+    #     h3_opinion,   # H3: non-Gaussian
+    #     h4_opinion,   # H4: bias
+    #     h5_opinion    # H5: whiteness violated
+    # )
+    # global_op_history.append(global_opinion)
+
+    h_opinions = [h1_opinion, h2_opinion, h3_opinion, h4_opinion, h5_opinion]
+    w_all = []
+    for h in h_opinions:
+        w_all.append(BiOpinion(h.belief(), h.disbelief(), h.prior_belief(), h.uncertainty()))
+
+    global_opinion_ss = fusion_weighted_belief(w_all)
+    global_opinion = sl.Opinion(global_opinion_ss.belief[0], global_opinion_ss.belief[1])
+    global_op_history.append(global_opinion)
+
+    # dc = r_opinion.degree_of_conflict(q_opinion)
+    # dc_history.append(dc)
+    dc = h1_opinion.degree_of_conflict(h2_opinion)
     dc_history.append(dc)
+
     # # --------------------------------------------------
     # # Four-hypothesis decision model
     # # H0  : no fault
@@ -1515,7 +1622,7 @@ for i, measurement in enumerate(measurements):
     # --------------------------------------------------
 
     # global fault probability = fault class
-    p_g = float(fused_kl_ad.getProjection()[1])
+    p_g = float(h3_opinion.getProjection()[1])
 
     # raw Q/R probabilities = fault class of respective opinions
     p_q_raw = float(q_opinion.getProjection()[1])
@@ -1736,11 +1843,14 @@ fig.set_subplots(
 for trace in fig.data:
     trace.update(xaxis="x1", yaxis="y1")
 
-b0_f, d0_f, u0_f = fused_op_obj_history[0].belief(), fused_op_obj_history[0].disbelief(), fused_op_obj_history[0].uncertainty()
-b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
+b0_f, d0_f, u0_f = global_op_history[0].belief(), global_op_history[0].disbelief(), global_op_history[0].uncertainty()
+# b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u0_f, u0_f2], b=[d0_f, d0_f2], c=[b0_f, b0_f2],
+        a=[u0_f], #, u0_f2],
+        b=[d0_f], #, d0_f2],
+        c=[b0_f], #, b0_f2],
+
         mode='markers',
         marker=dict(size=[14, 14], color=['purple', 'cyan']),
         hovertemplate=["F1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "F2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
@@ -1778,15 +1888,40 @@ fig.add_trace(
     row=1, col=4
 )
 
+b_h1, d_h1, u_h1 = h1_r_op_history[0].belief(), h1_r_op_history[0].disbelief(), h1_r_op_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u_h1], b=[d_h1], c=[b_h1],
+        mode='markers',
+        marker=dict(size=14, color='red'),
+        hovertemplate=["H1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H1"
+    ),
+    row=3, col=1
+)
+
+b_h2, d_h2, u_h2 = h2_q_op_history[0].belief(), h2_q_op_history[0].disbelief(), h2_q_op_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u_h2], b=[d_h2], c=[b_h2],
+        mode='markers',
+        marker=dict(size=14, color='blue'),
+        hovertemplate=["H2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H2"
+    ),
+    row=3, col=2
+)
+
 b0, d0, u0 = opinions[0]
 # b0_ks, d0_ks, u0_ks = ks_op_obj_history[0].belief(), ks_op_obj_history[0].disbelief(), ks_op_obj_history[0].uncertainty()
 b0_ad, d0_ad, u0_ad = opinions_ad[0]
+b_h3, d_h3, u_h3 = h3_ng_op_history[0].belief(), h3_ng_op_history[0].disbelief(), h3_ng_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u0, u0_ad], b=[d0, d0_ad], c=[b0, b0_ad],
+        a=[u0, u0_ad, u_h3], b=[d0, d0_ad, d_h3], c=[b0, b0_ad, b_h3],
         mode='markers',
-        marker=dict(size=14, color=['cyan', 'yellow']),
-        hovertemplate=["KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['cyan', 'yellow', 'pink']),
+        hovertemplate=["KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H3"
     ),
     row=3, col=3
@@ -1804,6 +1939,62 @@ fig.add_trace(
 # )
 
 
+
+
+b_h4, d_h4, u_h4 = h4_bias_op_history[0].belief(), h4_bias_op_history[0].disbelief(), h4_bias_op_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u_h4], b=[d_h4], c=[b_h4],
+        mode='markers',
+        marker=dict(size=14, color='green'),
+        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H4"
+    ),
+    row=3, col=4
+)
+
+
+# b0, d0, u0 = q_op_obj_history[0].belief(), q_op_obj_history[0].disbelief(), q_op_obj_history[0].uncertainty()
+# b0_r, d0_r, u0_r = r_op_obj_history[0].belief(), r_op_obj_history[0].disbelief(), r_op_obj_history[0].uncertainty()
+# # b0_q2, d0_q2, u0_q2 = q2_op_obj_history[0].belief(), q2_op_obj_history[0].disbelief(), q2_op_obj_history[0].uncertainty()
+# fig.add_trace(
+#     go.Scatterternary(
+#         a=[u0, u0_r], #, u0_q2],
+#         b=[d0, d0_r], #, d0_q2],
+#         c=[b0, b0_r], #, b0_q2],
+#         mode='markers',
+#         #subplot="ternary",
+#         marker=dict(size=14, color=['red', 'blue', 'purple']),
+#         hovertemplate=["Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Q2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
+#     ),
+#     row=3, col=4
+# )
+
+# b0_pq, d0_pq, u0_pq = q_paper_op_obj_history[0].belief(), q_paper_op_obj_history[0].disbelief(), q_paper_op_obj_history[0].uncertainty()
+# b0_pr, d0_pr, u0_pr = r_paper_op_obj_history[0].belief(), r_paper_op_obj_history[0].disbelief(), r_paper_op_obj_history[0].uncertainty()
+# fig.add_trace(
+#     go.Scatterternary(
+#         a=[u0_pq, u0_pr], b=[d0_pq, d0_pr], c=[b0_pq, b0_pr],
+#         mode='markers',
+#         marker=dict(size=[14, 14], color=['red', 'blue']),
+#         hovertemplate=["Paper Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Paper R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+#         name="Paper Fusion"
+#     ),
+#     row=3, col=5
+# )
+
+b_h5, d_h5, u_h5 = h5_white_op_history[0].belief(), h5_white_op_history[0].disbelief(), h5_white_op_history[0].uncertainty()
+fig.add_trace(
+    go.Scatterternary(
+        a=[u_h5], b=[d_h5], c=[b_h5],
+        mode='markers',
+        marker=dict(size=14, color='purple'),
+        hovertemplate=["H5<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H5"
+    ),
+    row=3, col=5
+)
+
 fig.add_trace(
     go.Bar(
         x=list(range(M)),
@@ -1811,34 +2002,6 @@ fig.add_trace(
         name="Bin counts"
     ),
     row=4, col=1
-)
-b0, d0, u0 = q_op_obj_history[0].belief(), q_op_obj_history[0].disbelief(), q_op_obj_history[0].uncertainty()
-b0_r, d0_r, u0_r = r_op_obj_history[0].belief(), r_op_obj_history[0].disbelief(), r_op_obj_history[0].uncertainty()
-# b0_q2, d0_q2, u0_q2 = q2_op_obj_history[0].belief(), q2_op_obj_history[0].disbelief(), q2_op_obj_history[0].uncertainty()
-fig.add_trace(
-    go.Scatterternary(
-        a=[u0, u0_r], #, u0_q2],
-        b=[d0, d0_r], #, d0_q2],
-        c=[b0, b0_r], #, b0_q2],
-        mode='markers',
-        #subplot="ternary",
-        marker=dict(size=14, color=['red', 'blue', 'purple']),
-        hovertemplate=["Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Q2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
-    ),
-    row=3, col=4
-)
-
-b0_pq, d0_pq, u0_pq = q_paper_op_obj_history[0].belief(), q_paper_op_obj_history[0].disbelief(), q_paper_op_obj_history[0].uncertainty()
-b0_pr, d0_pr, u0_pr = r_paper_op_obj_history[0].belief(), r_paper_op_obj_history[0].disbelief(), r_paper_op_obj_history[0].uncertainty()
-fig.add_trace(
-    go.Scatterternary(
-        a=[u0_pq, u0_pr], b=[d0_pq, d0_pr], c=[b0_pq, b0_pr],
-        mode='markers',
-        marker=dict(size=[14, 14], color=['red', 'blue']),
-        hovertemplate=["Paper Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Paper R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="Paper Fusion"
-    ),
-    row=3, col=5
 )
 
 n_base = len(fig.data)
@@ -1854,9 +2017,9 @@ new_frames = []
 
 for i, frame in enumerate(fig.frames):
     frame.name = str(i)
-    b_f, d_f, u_f = fused_op_obj_history[i].belief(), fused_op_obj_history[i].disbelief(), fused_op_obj_history[
+    b_f, d_f, u_f = global_op_history[i].belief(), global_op_history[i].disbelief(), global_op_history[
         i].uncertainty()
-    b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
+    # b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
     # b_ks, d_ks, u_ks = b0_ks, d0_ks, u0_ks#ks_op_obj_history[i].belief(), ks_op_obj_history[i].disbelief(), ks_op_obj_history[i].uncertainty()
     b_q, d_q, u_q = q_op_obj_history[i].belief(), q_op_obj_history[i].disbelief(), q_op_obj_history[i].uncertainty()
     # b_q2, d_q2, u_q2 = q2_op_obj_history[i].belief(), q2_op_obj_history[i].disbelief(), q2_op_obj_history[i].uncertainty()
@@ -1868,6 +2031,13 @@ for i, frame in enumerate(fig.frames):
     counts_i = counts_history[i]
     # counts_R_i = counts_R_history[i]
 
+    b_h1, d_h1, u_h1 = h1_r_op_history[i].belief(), h1_r_op_history[i].disbelief(), h1_r_op_history[i].uncertainty()
+    b_h2, d_h2, u_h2 = h2_q_op_history[i].belief(), h2_q_op_history[i].disbelief(), h2_q_op_history[i].uncertainty()
+    b_h3, d_h3, u_h3 = h3_ng_op_history[i].belief(), h3_ng_op_history[i].disbelief(), h3_ng_op_history[i].uncertainty()
+    b_h4, d_h4, u_h4 = h4_bias_op_history[i].belief(), h4_bias_op_history[i].disbelief(), h4_bias_op_history[i].uncertainty()
+    b_h5, d_h5, u_h5 = h5_white_op_history[i].belief(), h5_white_op_history[i].disbelief(), h5_white_op_history[
+        i].uncertainty()
+
     b_pq, d_pq, u_pq = q_paper_op_obj_history[i].belief(), q_paper_op_obj_history[i].disbelief(), \
     q_paper_op_obj_history[i].uncertainty()
     b_pr, d_pr, u_pr = r_paper_op_obj_history[i].belief(), r_paper_op_obj_history[i].disbelief(), \
@@ -1877,7 +2047,10 @@ for i, frame in enumerate(fig.frames):
     new_data = list(frame.data)
 
     new_data.append(
-        go.Scatterternary(a=[u_f, u_f2], b=[d_f, d_f2], c=[b_f, b_f2], cliponaxis=False)
+        go.Scatterternary(a=[u_f], #, u_f2],
+                          b=[d_f], #, d_f2],
+                          c=[b_f], #, b_f2],
+                          cliponaxis=False)
     )
 
     new_data.append(go.Scatterternary(a=[0], b=[1 - P], c=[P], cliponaxis=False))
@@ -1887,38 +2060,45 @@ for i, frame in enumerate(fig.frames):
                           showlegend=False, cliponaxis=False))
 
     new_data.append(
-        go.Scatterternary(a=[u, u_ad], b=[d, d_ad], c=[b, b_ad], cliponaxis=False)
+        go.Scatterternary(a=[u_h1], b=[d_h1], c=[b_h1], cliponaxis=False)
+    )
+    new_data.append(
+        go.Scatterternary(a=[u_h2], b=[d_h2], c=[b_h2], cliponaxis=False)
+    )
+    new_data.append(
+        go.Scatterternary(a=[u, u_ad, u_h3], b=[d, d_ad, d_h3], c=[b, b_ad, b_h3], cliponaxis=False)
     )
 
     # new_data.append(
     #     go.Scatter(x=x_pdf, y=y_i)
     # )
 
-
-
-    new_data.append( go.Bar( x=list(range(M)), y=counts_i ) )
-
+    # new_data.append(
+    #     go.Scatterternary(a=[u_q, u_r], #, u_q2],
+    #                       b=[d_q, d_r], #, d_q2],
+    #                       c=[b_q, b_r], #, b_q2])
+    #                       cliponaxis=False,
+    #                       )
+    # )
     new_data.append(
-        go.Scatterternary(a=[u_q, u_r], #, u_q2],
-                          b=[d_q, d_r], #, d_q2],
-                          c=[b_q, b_r], #, b_q2])
-                          cliponaxis=False,
-                          )
+        go.Scatterternary(a=[u_h4], b=[d_h4], c=[b_h4], cliponaxis=False)
+    )
+    new_data.append(
+        go.Scatterternary(a=[u_h5], b=[d_h5], c=[b_h5], cliponaxis=False)
     )
 
+    # new_data.append(
+    #     go.Scatterternary(a=[u_pq, u_pr], b=[d_pq, d_pr], c=[b_pq, b_pr], cliponaxis=False)
+    # )
 
-    new_data.append(
-        go.Scatterternary(a=[u_pq, u_pr], b=[d_pq, d_pr], c=[b_pq, b_pr], cliponaxis=False)
-    )
+    new_data.append(go.Bar(x=list(range(M)), y=counts_i))
 
-    # new_data.append(go.Bar(x=list(range(M)), y=counts_R_i))
+
 
     new_frames.append(go.Frame(data=new_data, name=frame.name))
 
 fig.frames = new_frames
 
-# fig.update_xaxes(title_text="Bin", row=2, col=3)
-# fig.update_yaxes(title_text="Count", row=2, col=3)
 sliders = [dict(
     steps=[
         dict(
