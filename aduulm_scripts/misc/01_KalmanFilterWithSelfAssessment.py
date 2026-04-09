@@ -1717,14 +1717,20 @@ import plotly.graph_objects as go
 fig = plotter.fig
 
 fig.set_subplots(
-    rows=3, cols=3,
+    rows=4, cols=5,
     specs=[
-        [{"colspan": 2}, None, {"type": "ternary"}],   # Zeile 1: Track
-        [{"type": "ternary"}, {"type": "xy"}, {"type": "xy"}],  # Zeile 2
-        [{"type": "ternary"}, None, {"type": "ternary"}]  # optional frei
+        [{"colspan": 2, "rowspan": 2},  None,                   None,                   {"colspan": 2, "rowspan": 2, "type": "ternary"}, None],              # Zeile 1
+        [None,                          None,                   None,                   None,                   None                ],        # Zeile 2
+        [{"type": "ternary"},           {"type": "ternary"},    {"type": "ternary"},    {"type": "ternary"},    {"type": "ternary"}],        # Zeile 3
+        [{"type": "xy"},                None,                   None,                   None,                   None                ]
     ],
-    vertical_spacing=0.05,
-    horizontal_spacing=0.1
+    subplot_titles=[
+        "Track", "Global Opinion",
+        "H1 Opinion", "H2 Opinion", "H3 Opinion", "H4 Opinion", "H5 Opinion",
+        "Histogram",
+    ],
+    vertical_spacing=0.08 ,
+    horizontal_spacing=0
 )
 
 for trace in fig.data:
@@ -1738,9 +1744,9 @@ fig.add_trace(
         mode='markers',
         marker=dict(size=[14, 14], color=['purple', 'cyan']),
         hovertemplate=["F1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "F2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="Constraint Fusion"
+        name="Global Opinion"
     ),
-    row=1, col=3
+    row=1, col=4
 )
 
 prior = 0.5  # oder: opinion.prior_belief_masses[0]
@@ -1757,7 +1763,7 @@ fig.add_trace(
         name='Projected Probability',
         hovertemplate="P: %{c:.2f}<extra></extra>"
     ),
-    row=1, col=3
+    row=1, col=4
 )
 
 fig.add_trace(
@@ -1769,7 +1775,7 @@ fig.add_trace(
                 line=dict(color='green', dash='dot'),
                 showlegend=False
             ),
-    row=1, col=3
+    row=1, col=4
 )
 
 b0, d0, u0 = opinions[0]
@@ -1780,23 +1786,22 @@ fig.add_trace(
         a=[u0, u0_ad], b=[d0, d0_ad], c=[b0, b0_ad],
         mode='markers',
         marker=dict(size=14, color=['cyan', 'yellow']),
-        hovertemplate=["KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
+        hovertemplate=["KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H3"
     ),
-    row=2, col=1
+    row=3, col=3
 )
 
-
-
-fig.add_trace(
-    go.Scatter(
-        x=x_pdf,
-        y=dirichlet_pdfs[0],
-        mode='lines',
-        line=dict(color='blue'),
-        name='Beta'
-    ),
-    row=2, col=2
-)
+# fig.add_trace(
+#     go.Scatter(
+#         x=x_pdf,
+#         y=dirichlet_pdfs[0],
+#         mode='lines',
+#         line=dict(color='blue'),
+#         name='Beta'
+#     ),
+#     row=2, col=2
+# )
 
 
 fig.add_trace(
@@ -1805,7 +1810,7 @@ fig.add_trace(
         y=counts_history[0],
         name="Bin counts"
     ),
-    row=2, col=3
+    row=4, col=1
 )
 b0, d0, u0 = q_op_obj_history[0].belief(), q_op_obj_history[0].disbelief(), q_op_obj_history[0].uncertainty()
 b0_r, d0_r, u0_r = r_op_obj_history[0].belief(), r_op_obj_history[0].disbelief(), r_op_obj_history[0].uncertainty()
@@ -1820,7 +1825,7 @@ fig.add_trace(
         marker=dict(size=14, color=['red', 'blue', 'purple']),
         hovertemplate=["Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Q2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]
     ),
-    row=3, col=1
+    row=3, col=4
 )
 
 b0_pq, d0_pq, u0_pq = q_paper_op_obj_history[0].belief(), q_paper_op_obj_history[0].disbelief(), q_paper_op_obj_history[0].uncertainty()
@@ -1831,9 +1836,9 @@ fig.add_trace(
         mode='markers',
         marker=dict(size=[14, 14], color=['red', 'blue']),
         hovertemplate=["Paper Q<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Paper R<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="Constraint Fusion"
+        name="Paper Fusion"
     ),
-    row=3, col=3
+    row=3, col=5
 )
 
 n_base = len(fig.data)
@@ -1885,9 +1890,9 @@ for i, frame in enumerate(fig.frames):
         go.Scatterternary(a=[u, u_ad], b=[d, d_ad], c=[b, b_ad], cliponaxis=False)
     )
 
-    new_data.append(
-        go.Scatter(x=x_pdf, y=y_i)
-    )
+    # new_data.append(
+    #     go.Scatter(x=x_pdf, y=y_i)
+    # )
 
 
 
@@ -1933,7 +1938,7 @@ sliders = [dict(
 fig.update_layout(sliders=sliders)
 
 fig.update_layout(
-    height=1100,
+    height=1000,
 
     ternary=dict(
         sum=1,
@@ -1972,9 +1977,30 @@ fig.update_layout(
                    ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
         caxis=dict(title='belief', showgrid=True, gridcolor='black',
                    ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+    ),
+    ternary5=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+    ),
+    ternary6=dict(
+        sum=1,
+        aaxis=dict(title='uncertainty', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        baxis=dict(title='disbelief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
+        caxis=dict(title='belief', showgrid=True, gridcolor='black',
+                   ticks='', linecolor='rgba(0,0,0,0)', showticklabels=False),
     )
 
 )
+for ann in fig.layout.annotations:
+    if "Opinion" in ann.text:
+        ann.update(x=ann.x - 0.1, y=ann.y - 0.05, xanchor='left', align='left')
 
 plotter.fig.show(renderer="browser")
 plotter.show()
