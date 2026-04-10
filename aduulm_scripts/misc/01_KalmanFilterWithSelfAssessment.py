@@ -72,7 +72,7 @@ truth = GroundTruthPath([GroundTruthState([0, 1, 0, 1], timestamp=timesteps[0])]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 1/10
+disturbance_factor_process = 1
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
@@ -81,7 +81,7 @@ gt_transition_configs = {
 }
 process_noise_coeff_memory = [[], []]
 
-num_steps = 400
+num_steps = 500
 # np.random.seed(1991)
 for k in range(1, num_steps + 1):
 
@@ -151,7 +151,7 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 4
+disturbance_factor_meas = 1
 gt_measurement_configs = {
     'disturbance_mode': ['jump'],
     'parameters': [[[50, disturbance_factor_meas], [100, 1/disturbance_factor_meas], [250, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]]
@@ -179,7 +179,10 @@ for k, state in enumerate(truth):
 #                                   measurement_model=measurement_model_2
 #                                   )
 #                         )
-
+# %%
+# for i, measurement in enumerate(measurements):
+#     if 350 <= i <= 400:
+#         measurement.state_vector += np.array([[5], [-5]])
 # %%
 # Plot the result, again mapping the x and y position values
 plotter.plot_measurements(measurements, [0, 2])
@@ -642,6 +645,26 @@ def cusum_lite_score(X):
     Xc = X - np.mean(X, axis=0, keepdims=True)
     S = np.cumsum(Xc, axis=0)
     return float(np.max(np.linalg.norm(S, axis=1)) / np.sqrt(len(X)))
+
+# H4
+def h4_zero_mean_test_empirical(X, ridge=1e-6):
+    """
+    Wald/Hotelling-like zero-mean test with empirical covariance.
+    X shape: (N, m)
+    """
+    X = np.asarray(X, dtype=float)
+    N, m = X.shape
+
+    if N < max(6, m + 2):
+        return np.nan
+
+    mu = np.mean(X, axis=0).reshape(-1, 1)
+    Sigma_hat = np.cov(X, rowvar=False)
+    Sigma_hat = np.atleast_2d(Sigma_hat)
+    Sigma_hat += ridge * np.eye(m)
+
+    T_mu = float(N * (mu.T @ np.linalg.inv(Sigma_hat) @ mu).item())
+    return T_mu
 # %%
 from stonesoup.types.state import GaussianState
 prior = GaussianState([[0], [1], [0], [1]], np.diag([.5, 0.1, .5, 0.1]), timestamp=start_time)
@@ -675,7 +698,8 @@ alphas_R = np.array([1.0, 1.0])
 # -----------------------------
 h1_r_alphas = np.array([1.0, 1.0])     # H1: R false
 h2_q_alphas = np.array([1.0, 1.0])     # H2: Q / dynamics false
-h4_bias_alphas = np.array([1.0, 1.0])  # H4: bias / mean shift
+h4_bias_meta_alphas = np.array([1.0, 1.0])  # H4: bias / mean shift
+h4_bias_direct_alphas = np.array([1.0, 1.0])
 h5_white_alphas = np.array([1.0, 1.0]) # H5: lack of whiteness
 
 m = len(measurement_model.mapping)
@@ -709,6 +733,7 @@ counts_history = []
 counts_R = np.ones(M) * (1/M)
 counts_R_history = []
 nu_history = []
+raw_nu_history = []
 kl_C_history = []
 kl_kde_history = []
 belief_history = []
@@ -749,6 +774,8 @@ h1_r_op_history = []
 h2_q_op_history = []
 h3_ng_op_history = []
 h4_bias_op_history = []
+h4_1_op_history = []
+h4_2_op_history = []
 h5_white_op_history = []
 global_op_history = []
 
@@ -756,6 +783,9 @@ global_op_history = []
 h1_r_score_history = []
 h2_q_score_history = []
 h4_bias_score_history = []
+h4_T_mu_history = []
+h4_test_history=[]
+h4_count_history=[]
 h5_white_score_history = []
 
 pi0_history = []
@@ -835,7 +865,12 @@ for i, measurement in enumerate(measurements):
     meas_pred = hypothesis.measurement_prediction.mean
     delta = (measurement.state_vector - meas_pred).copy()
     S = hypothesis.measurement_prediction.covar.copy()
-    delta = delta.reshape(-1, 1)
+    delta = delta.reshape(-1, 1)            # Innovation
+
+    raw_nu_history.append(delta.flatten())
+    if len(raw_nu_history) > max_buffer:
+        raw_nu_history.pop(0)
+
     P = hypothesis.prediction.covar
     H = measurement_model.matrix()
     K = P @ H.T @ np.linalg.inv(S)
@@ -903,24 +938,114 @@ for i, measurement in enumerate(measurements):
     h5_white_op_history.append(h5_opinion)
 
     # ---------------------------------
-    # H4: bias / mean shift
+    # H4: zero-mean hypothesis on raw innovations
+    # Proposition: "innovations are zero-mean"
+    # belief     -> mean zero
+    # disbelief  -> bias / mean shift present
     # ---------------------------------
-    if len(nu_history) >= 8:
-        nu_stack_h4 = np.stack(nu_history, axis=0)
+    N_h4 = 16
+    counts_h4 = np.ones(M) * (1 / M)
+    if len(raw_nu_history) >= max(N_h4, m + 3):
+        X_h4 = np.asarray(raw_nu_history[-N_h4:])
 
-        score_mean = deviation_to_probability_rational(mean_shift_score(nu_stack_h4), tau=0.12)
-        score_cusum = deviation_to_probability_rational(cusum_lite_score(nu_stack_h4), tau=0.5)
+        T_mu = h4_zero_mean_test_empirical(X_h4, ridge=1e-6)
 
-        score_h4 = 0.5 * score_mean + 0.5 * score_cusum
+        # fault evidence
+        # lambda_h4 = 1/sqrt(max_buffer)
+        # e_beta = 1 - np.exp(-lambda_h4 * T_mu)
 
-        h4_bias_score_history.append(score_h4)
-        h4_opinion, h4_bias_alphas = make_opinion_from_probability(
-            score_h4, h4_bias_alphas, forget=forget_param
+        tau_h4 = chi2.ppf(0.95, df=m)  # ca. "signifikant auffällig"
+        e_beta = 1 - np.exp(-T_mu / tau_h4)
+        # support for H0
+        e_alpha = 1 - e_beta
+
+        h4_T_mu_history.append(T_mu)
+        h4_bias_score_history.append(e_beta)
+
+        h4_bias_direct_alphas *= forget_param
+        h4_bias_direct_alphas += np.array([e_alpha, e_beta])
+        h4_bias_direct_alphas = np.maximum(h4_bias_direct_alphas, 1.0)
+
+        dist = sl.DirichletDistribution2d(h4_bias_direct_alphas)
+        opinion = dist.as_opinion()
+
+        projected = opinion.getProjection()
+        u_max = min(
+            projected[0] / opinion.prior_belief_masses[0],
+            projected[1] / opinion.prior_belief_masses[1]
         )
+        b_max = projected[0] - opinion.prior_belief_masses[0] * u_max
+        d_max = projected[1] - opinion.prior_belief_masses[1] * u_max
+        h4_direct_opinion = sl.Opinion(b_max, d_max)
+
+        # nu_stack = nu_history[-N:]
+        # nu_mean = np.mean(nu_stack, axis=0)
+        # T_nu = (N * (nu_mean @ nu_mean.T)).item()
+
+        h4_test = chi2.cdf(T_mu, df=m)
+        h4_test_history.append(h4_test)
+        if len(h4_test_history) > max_buffer:
+            h4_test_history.pop(0)
+
+        for u_i in h4_test_history:
+            idx = np.searchsorted(bin_edges, u_i, side='right') - 1
+            idx = np.clip(idx, 0, M - 1)
+            counts_h4[idx] += 1
+
+        h4_count_history.append(counts_h4)
+        N = np.sum(counts_h4)
+        p = counts_h4 / N
+        # numerisch stabil
+        p_safe = np.clip(p, 1e-12, 1.0)
+
+        H = -1 * np.sum(p_safe * np.log(p_safe))
+        H_max = np.log(M)
+
+        C = H / H_max  # ∈ [0,1]
+        #
+        # N_eff = len(h4_test_history)
+        #
+        # D_KL = H_max - H
+        # D_KL_bias = (M - 1) / (2.0 * max(N_eff, 1))
+        # D_KL_corr = max(0.0, D_KL - D_KL_bias)
+        #
+        # kappa_kl = 1.0
+        # p_kl = 1.0 - np.exp(-kappa_kl * N_eff * D_KL_corr)
+        #
+        # e_beta = p_kl
+        # e_alpha = 1.0 - p_kl
+        e_alpha = C
+        e_beta = 1 - C
+        # h4_bias_score_history.append(D_KL)
+
+        h4_bias_meta_alphas *= forget_param
+        h4_bias_meta_alphas += np.array([e_alpha, e_beta])
+        h4_bias_meta_alphas = np.maximum(h4_bias_meta_alphas, 1)
+
+        # -----------------------------
+        # Subjective Logic Opinion
+        # -----------------------------
+        dist = sl.DirichletDistribution2d(h4_bias_meta_alphas)
+        opinion = dist.as_opinion()
+
+        # uncertainty maximized
+        projected = opinion.getProjection()
+        u_max = min(projected[0] / opinion.prior_belief_masses[0], projected[1] / opinion.prior_belief_masses[1])
+        b_max = projected[0] - opinion.prior_belief_masses[0] * u_max
+        d_max = projected[1] - opinion.prior_belief_masses[1] * u_max
+        h4_meta_opinion = sl.Opinion(b_max, d_max)
+        # h4_opinion = h4_direct_opinion
     else:
         h4_opinion = sl.Opinion(0, 0)
+        h4_direct_opinion = sl.Opinion(0, 0)
+        h4_meta_opinion = sl.Opinion(0, 0)
+        h4_bias_score_history.append(0)
+        h4_T_mu_history.append(0)
+        h4_count_history.append(counts_h4)
 
-    h4_bias_op_history.append(h4_opinion)
+    h4_1_op_history.append(h4_direct_opinion)
+    h4_2_op_history.append(h4_meta_opinion)
+    # h4_bias_op_history.append(h4_opinion)
 
     # OLD Q-TEST
     rho = 0
@@ -1039,13 +1164,6 @@ for i, measurement in enumerate(measurements):
         ad_op_obj_history.append(ad_opinion)
         opinions_ad.append((0.0, 0.0, 1))
 
-
-    counts = np.ones(M) * (1/M)
-    for u_i in u_buffer:
-        idx = np.searchsorted(bin_edges, u_i, side='right') - 1
-        idx = np.clip(idx, 0, M - 1)
-        counts[idx] += 1
-
     # idx = np.searchsorted(bin_edges, u, side='right') - 1
     # idx = np.clip(idx, 0, M - 1)
     # counts *= forget_param
@@ -1054,6 +1172,11 @@ for i, measurement in enumerate(measurements):
     # counts[max(idx - 1, 0)] += 0.15
     # counts[min(idx + 1, M - 1)] += 0.15
 
+    counts = np.ones(M) * (1/M)
+    for u_i in u_buffer:
+        idx = np.searchsorted(bin_edges, u_i, side='right') - 1
+        idx = np.clip(idx, 0, M - 1)
+        counts[idx] += 1
 
     counts_history.append(list(counts))
 
@@ -1075,22 +1198,22 @@ for i, measurement in enumerate(measurements):
 
 
     C_history.append(C)
-    # N_eff = (np.sum(counts))
-    # # C-scale as transformation of KL-divergence
-    # e_alpha = C #*N_eff
-    # e_beta = (1 - C) #*N_eff
+    N_eff = (np.sum(counts))
+    # C-scale as transformation of KL-divergence
+    e_alpha = C #*N_eff
+    e_beta = (1 - C) #*N_eff
 
-    N_eff = len(u_buffer)
+    # N_eff = len(u_buffer)
+    #
+    # D_KL = np.log(M) - H
+    # D_KL_bias = (M - 1) / (2.0 * max(N_eff, 1))
+    # D_KL_corr = max(0.0, D_KL - D_KL_bias)
+    #
+    # kappa_kl = 1.0
+    # p_kl = 1.0 - np.exp(-kappa_kl * N_eff * D_KL_corr)
 
-    D_KL = np.log(M) - H
-    D_KL_bias = (M - 1) / (2.0 * max(N_eff, 1))
-    D_KL_corr = max(0.0, D_KL - D_KL_bias)
-
-    kappa_kl = 1.0
-    p_kl = 1.0 - np.exp(-kappa_kl * N_eff * D_KL_corr)
-
-    e_beta = p_kl
-    e_alpha = 1.0 - p_kl
+    # e_beta = p_kl
+    # e_alpha = 1.0 - p_kl
 
     alphas *= forget_param
     alphas += np.array([e_alpha, e_beta])
@@ -1392,6 +1515,9 @@ for i, measurement in enumerate(measurements):
     h3_ng_op_history.append(h3_opinion)
 
     fused_op_obj_history.append(h3_opinion)   # optional: keep old history for plotting
+
+    h4_opinion = h4_direct_opinion.wb_fuse(h4_meta_opinion)  # weighted belief fusion
+    h4_bias_op_history.append(h4_opinion)
 
     # ---------------------------------
     # Global opinion from five hypotheses
@@ -1709,13 +1835,13 @@ print("p_r_paper_history:", p_r_paper_history)
 # plt.bar(range(M), counts)
 # plt.title("Bin counts")
 plt.figure()
-plt.plot(p_q_paper_history, label="P Q")
-plt.plot(p_r_paper_history, label="P R")
+plt.plot(h4_bias_score_history, label="H4 bias")
+plt.title("Score history")
 plt.legend()
-plt.title("paper stats")
-# plt.figure()
-# plt.plot(list(range(len(kl_kde_history))), kl_kde_history)
-# plt.title("kl_kde_history")
+plt.figure()
+plt.plot(h4_T_mu_history, label="H4 bias")
+plt.title("Test history")
+plt.legend()
 # plt.figure()
 # plt.plot(belief_history, label="Belief KL")
 # # plt.plot(disbelief_history, label="Disbelief")
@@ -1829,15 +1955,15 @@ fig.set_subplots(
         [{"colspan": 2, "rowspan": 2},  None,                   None,                   {"colspan": 2, "rowspan": 2, "type": "ternary"}, None],              # Zeile 1
         [None,                          None,                   None,                   None,                   None                ],        # Zeile 2
         [{"type": "ternary"},           {"type": "ternary"},    {"type": "ternary"},    {"type": "ternary"},    {"type": "ternary"}],        # Zeile 3
-        [{"type": "xy"},                None,                   None,                   None,                   None                ]
+        [None,                          None,                   {"type": "xy"},         {"type": "xy"},         None                ]
     ],
     subplot_titles=[
         "Track", "Global Opinion",
         "H1 Opinion", "H2 Opinion", "H3 Opinion", "H4 Opinion", "H5 Opinion",
-        "Histogram",
+        "H3 Histogram", "H4 Histogram"
     ],
     vertical_spacing=0.08 ,
-    horizontal_spacing=0
+    horizontal_spacing=0.01
 )
 
 for trace in fig.data:
@@ -1942,12 +2068,14 @@ fig.add_trace(
 
 
 b_h4, d_h4, u_h4 = h4_bias_op_history[0].belief(), h4_bias_op_history[0].disbelief(), h4_bias_op_history[0].uncertainty()
+b_h41, d_h41, u_h41 = h4_1_op_history[0].belief(), h4_1_op_history[0].disbelief(), h4_1_op_history[0].uncertainty()
+b_h42, d_h42, u_h42 = h4_2_op_history[0].belief(), h4_2_op_history[0].disbelief(), h4_2_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h4], b=[d_h4], c=[b_h4],
+        a=[u_h4, u_h41, u_h42], b=[d_h4, d_h41, d_h42], c=[b_h4, b_h41, b_h42],
         mode='markers',
-        marker=dict(size=14, color='green'),
-        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['green', 'yellow', 'cyan']),
+        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H4"
     ),
     row=3, col=4
@@ -1999,9 +2127,22 @@ fig.add_trace(
     go.Bar(
         x=list(range(M)),
         y=counts_history[0],
-        name="Bin counts"
+        name="H3 counts",
+        marker=dict(color='cyan')
+
     ),
-    row=4, col=1
+    row=4, col=3
+)
+
+fig.add_trace(
+    go.Bar(
+        x=list(range(M)),
+        y=h4_count_history[0],
+        name="H4 counts",
+        marker=dict(color='cyan')
+
+    ),
+    row=4, col=4
 )
 
 n_base = len(fig.data)
@@ -2029,12 +2170,15 @@ for i, frame in enumerate(fig.frames):
     y_i = dirichlet_pdfs[i]
     P = b_f + prior * u_f
     counts_i = counts_history[i]
+    counts_h4 = h4_count_history[i]
     # counts_R_i = counts_R_history[i]
 
     b_h1, d_h1, u_h1 = h1_r_op_history[i].belief(), h1_r_op_history[i].disbelief(), h1_r_op_history[i].uncertainty()
     b_h2, d_h2, u_h2 = h2_q_op_history[i].belief(), h2_q_op_history[i].disbelief(), h2_q_op_history[i].uncertainty()
     b_h3, d_h3, u_h3 = h3_ng_op_history[i].belief(), h3_ng_op_history[i].disbelief(), h3_ng_op_history[i].uncertainty()
     b_h4, d_h4, u_h4 = h4_bias_op_history[i].belief(), h4_bias_op_history[i].disbelief(), h4_bias_op_history[i].uncertainty()
+    b_h41, d_h41, u_h41 = h4_1_op_history[i].belief(),  h4_1_op_history[i].disbelief(), h4_1_op_history[i].uncertainty()
+    b_h42, d_h42, u_h42 = h4_2_op_history[i].belief(), h4_2_op_history[i].disbelief(), h4_2_op_history[i].uncertainty()
     b_h5, d_h5, u_h5 = h5_white_op_history[i].belief(), h5_white_op_history[i].disbelief(), h5_white_op_history[
         i].uncertainty()
 
@@ -2081,7 +2225,7 @@ for i, frame in enumerate(fig.frames):
     #                       )
     # )
     new_data.append(
-        go.Scatterternary(a=[u_h4], b=[d_h4], c=[b_h4], cliponaxis=False)
+        go.Scatterternary(a=[u_h4, u_h41, u_h42], b=[d_h4, d_h41, d_h42], c=[b_h4, b_h41, b_h42], cliponaxis=False)
     )
     new_data.append(
         go.Scatterternary(a=[u_h5], b=[d_h5], c=[b_h5], cliponaxis=False)
@@ -2092,6 +2236,7 @@ for i, frame in enumerate(fig.frames):
     # )
 
     new_data.append(go.Bar(x=list(range(M)), y=counts_i))
+    new_data.append(go.Bar(x=list(range(M)), y=counts_h4))
 
 
 
