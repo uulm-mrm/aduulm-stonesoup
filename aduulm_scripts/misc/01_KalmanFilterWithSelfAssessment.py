@@ -72,12 +72,13 @@ truth = GroundTruthPath([GroundTruthState([0, 1, 0, 1], timestamp=timesteps[0])]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 16 #16
+disturbance_factor_process = 10 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
     'disturbance_mode': ['jump'],
-    'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
+    # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
+    'parameters': [[[400, disturbance_factor_process], [450, 1/disturbance_factor_process]]]
 }
 process_noise_coeff_memory = [[], []]
 
@@ -151,10 +152,12 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 4 #4
+disturbance_factor_meas = 1 #4
 gt_measurement_configs = {
-    'disturbance_mode': ['jump'],
-    'parameters': [[[50, disturbance_factor_meas], [100, 1/disturbance_factor_meas], [250, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]]
+    'disturbance_mode': ['jump', 'drift', 'outliers'],
+    'parameters': [[[50, 2], [100, 0.5]], [[150, 200, 2.5], [200, 250, 0.4]], [[300, 350, 10, 3]]]
+    # 'disturbance_mode': ['jump'],
+    # 'parameters': [[[50, disturbance_factor_meas], [100, 1/disturbance_factor_meas], [250, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]]
 }
 meas_std_dev_memory = []
 
@@ -206,7 +209,7 @@ from stonesoup.subjective_logic.subjective_logic import BiOpinion, fusion_weight
 # Self-assessor settings
 sa_settings = {
     "num_X": 7,
-    "n_st": 20,
+    "n_st": 35,
     "n_c": 1,
     "dim_meas": measurement_model.ndim_meas,
     "alpha_threshold_dc": 0.1,
@@ -223,7 +226,7 @@ selfassessor_measures_history = []
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
 nis_settings = {
-    "window_length": 1,  # window size of the NIS averaging
+    "window_length": 35,  # window size of the NIS averaging
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
@@ -513,6 +516,7 @@ from subjective_logic.draw_sl_opinions import *
 
 # %%
 from stonesoup.types.track import Track
+from stonesoup.types.groundtruth import GroundTruthPath
 from scipy.stats import chi2, beta
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -739,9 +743,14 @@ Q_h2 = stationary["Q"]
 H_h2 = stationary["H"]
 R_h2 = stationary["R"]
 m_h2 = H_h2.shape[0]
+K_inf = stationary["K_inf"]
+print("Stationary Kalman Gain:\n", K_inf)
 
 Sigma_eta_ref = stationary["Sigma_eta_inf"]
 
+from ordered_set import OrderedSet
+tracks = set([Track([])])
+truths = set([GroundTruthPath([truth])])
 
 for i, measurement in enumerate(measurements):
     prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
@@ -749,6 +758,8 @@ for i, measurement in enumerate(measurements):
     post = updater.update(hypothesis)
     track.append(post)
     prior = track[-1]
+    for t in tracks:
+        t.append(post)
 
     filtered_state_buffer.append(post)
     predicted_state_buffer.append(prediction)
@@ -927,7 +938,7 @@ for i, measurement in enumerate(measurements):
     # h5_opinion = h5_direct_opinion
 
     # later, if both behave well:
-    h5_opinion = h5_direct_opinion.wb_fuse(h5_meta_opinion)
+    h5_opinion = h5_direct_opinion #h5_direct_opinion.wb_fuse(h5_meta_opinion)
 
     h5_white_op_history.append(h5_opinion)
 
@@ -1040,6 +1051,9 @@ for i, measurement in enumerate(measurements):
     h4_1_op_history.append(h4_direct_opinion)
     h4_2_op_history.append(h4_meta_opinion)
     # h4_bias_op_history.append(h4_opinion)
+
+    h4_opinion = h4_direct_opinion #h4_direct_opinion.wb_fuse(h4_meta_opinion)  # weighted belief fusion
+    h4_bias_op_history.append(h4_opinion)
 
     # OLD Q-TEST
     rho = 0
@@ -1246,12 +1260,6 @@ for i, measurement in enumerate(measurements):
     op_obj_history.append(kl_opinion)
     # opinion.prior_belief_masses = [1.0, 0]
     opinions.append((kl_opinion.belief(), kl_opinion.disbelief(), kl_opinion.uncertainty()))
-    belief_history.append(kl_opinion.belief())
-    disbelief_history.append(kl_opinion.disbelief())
-    uncertainty_history.append(kl_opinion.uncertainty())
-
-
-
 
     counts_R_history = counts_history.copy()
 
@@ -1745,8 +1753,7 @@ for i, measurement in enumerate(measurements):
 
     fused_op_obj_history.append(h3_opinion)   # optional: keep old history for plotting
 
-    h4_opinion = h4_direct_opinion.wb_fuse(h4_meta_opinion)  # weighted belief fusion
-    h4_bias_op_history.append(h4_opinion)
+
 
     # ---------------------------------
     # Global opinion from five hypotheses
@@ -1773,6 +1780,11 @@ for i, measurement in enumerate(measurements):
     global_opinion_ss = fusion_weighted_belief(w_all)
     global_opinion = sl.Opinion(global_opinion_ss.belief[0], global_opinion_ss.belief[1])
     global_op_history.append(global_opinion)
+
+    belief_history.append(global_opinion.belief())
+    disbelief_history.append(global_opinion.disbelief())
+    uncertainty_history.append(global_opinion.uncertainty())
+
 
     # dc = r_opinion.degree_of_conflict(q_opinion)
     # dc_history.append(dc)
@@ -1981,7 +1993,7 @@ for i, measurement in enumerate(measurements):
     # --------------------------------------------------
 
     # global fault probability = fault class
-    p_g = float(h3_opinion.getProjection()[1])
+    p_g = float(global_opinion.getProjection()[0])
 
     # raw Q/R probabilities = fault class of respective opinions
     p_q_raw = float(q_opinion.getProjection()[1])
@@ -2053,7 +2065,7 @@ for i, measurement in enumerate(measurements):
     p_q_history.append(pi_Q + pi_QR)
     p_r_history.append(pi_R + pi_QR)
 
-print(h2_D_history)
+
 # plt.plot(list(range(len(cum_u))), cum_u)
 # plt.title("cum_u")
 # plt.figure()
@@ -2062,80 +2074,50 @@ print(h2_D_history)
 # plt.figure()
 # plt.plot(ad_history)
 # plt.title("AD score")
-plt.figure()
-plt.plot(h2_u_values, label="H2 u history")
-plt.plot(u_history, label="H3 u history")
-plt.title("Score history")
-plt.legend()
-plt.figure()
-plt.plot(h2_C_history, label="H2 C-value")
-plt.plot(C_history, label="H3 C-value")
-plt.plot(h2_D_history, label="H2 D-value")
-# plt.plot(h2_T_history, label="H2 T-value")
-plt.plot(h2_valid_count_history, label="H2 Valid Count")
-plt.title("Test history")
-plt.legend()
 # plt.figure()
-# plt.plot(belief_history, label="Belief KL")
-# # plt.plot(disbelief_history, label="Disbelief")
-# plt.plot(uncertainty_history, label="Uncertainty KL")
-# plt.plot(ad_belief_history, label="Belief AD")
-# plt.plot(ad_uncertainty_history, label="Uncertainty AD")
-# plt.title("Opinion comparison")
+# plt.plot(h2_u_values, label="H2 u history")
+# plt.plot(u_history, label="H3 u history")
+# plt.title("Score history")
+# plt.legend()
+# plt.figure()
+# plt.plot(h2_C_history, label="H2 C-value")
+# plt.plot(C_history, label="H3 C-value")
+# plt.plot(h2_D_history, label="H2 D-value")
+# # plt.plot(h2_T_history, label="H2 T-value")
+# plt.plot(h2_valid_count_history, label="H2 Valid Count")
+# plt.title("Test history")
 # plt.legend()
 plt.figure()
-plt.plot(dc_history, label="Degree of Conflict (global vs Q)")
-plt.plot(p_s_history, label="Projection (global)")
-plt.plot(p_r_history, label="Projection (R)")
-plt.plot(p_q_history, label="Projection (Q)")
-plt.title("Projection comparison")
+# plt.plot(belief_history, label="Belief")
+# plt.plot(disbelief_history, label="Disbelief")
+# plt.plot(uncertainty_history, label="Uncertainty")
+plt.plot([0, len(belief_history)], [0.5, 0.5], "r--")
+plt.plot(p_s_history, label="Projection (global)", linewidth=3, zorder=100)
+plt.plot([h1.getProjection()[0] for h1 in h1_r_op_history], label="Projection (H1)")
+plt.plot([h2.getProjection()[0] for h2 in h2_q_op_history], label="Projection (H2)")
+plt.plot([h3.getProjection()[0] for h3 in h3_ng_op_history], label="Projection (H3)")
+plt.plot([h4.getProjection()[0] for h4 in h4_bias_op_history], label="Projection (H4)")
+plt.plot([h5.getProjection()[0] for h5 in h5_white_op_history], label="Projection (H5)")
+plt.title("Opinions")
 plt.legend()
+# plt.figure()
+# plt.plot(dc_history, label="Degree of Conflict (global vs Q)")
+# plt.plot(p_s_history, label="Projection (global)")
+# plt.plot(p_r_history, label="Projection (R)")
+# plt.plot(p_q_history, label="Projection (Q)")
+# plt.title("Projection comparison")
+# plt.legend()
 plt.figure()
 plt.plot(decision_history, label="Decision history")
 plt.legend()
 plt.title("Hypotheses decision")
-plt.figure()
-plt.plot(pi0_history, label="Pi 0")
-plt.plot(piQ_history, label="Pi Q")
-plt.plot(piR_history, label="Pi R")
-plt.plot(piQR_history, label="Pi QR")
-plt.legend()
-plt.title("Pi comparison")
-# def compute_ema(data, alpha=0.1):
-#     ema = []
-#     prev = data[0]  # Initialwert
-#     for x in data:
-#         prev = alpha * x + (1 - alpha) * prev
-#         ema.append(prev)
-#     return ema
-#
-# alpha = 0.1  # oder z.B. 0.05 für stärkere Glättung
-#
-# ema_pi0  = compute_ema(pi0_history, alpha)
-# ema_piQ  = compute_ema(piQ_history, alpha)
-# ema_piR  = compute_ema(piR_history, alpha)
-# ema_piQR = compute_ema(piQR_history, alpha)
-#
 # plt.figure()
-# plt.plot(ema_pi0,  label="EMA Pi 0")
-# plt.plot(ema_piQ,  label="EMA Pi Q")
-# plt.plot(ema_piR,  label="EMA Pi R")
-# plt.plot(ema_piQR, label="EMA Pi QR")
-#
+# plt.plot(pi0_history, label="Pi 0")
+# plt.plot(piQ_history, label="Pi Q")
+# plt.plot(piR_history, label="Pi R")
+# plt.plot(piQR_history, label="Pi QR")
 # plt.legend()
-# plt.title("Pi comparison with EMA")
-#
-# plt.figure()
-# ema_p_s = compute_ema(p_s_history, alpha)
-# ema_p_q = compute_ema(p_q_history, alpha)
-# ema_p_r = compute_ema(p_r_history, alpha)
-# ema_dc = compute_ema(dc_history, alpha)
-# plt.plot(ema_dc, label="EMA DC history")
-# plt.plot(ema_p_s, label="EMA P global")
-# plt.plot(ema_p_q, label="EMA P Q")
-# plt.plot(ema_p_r, label="EMA P R")
-# plt.legend()
-# plt.title("EMA P comparison")
+# plt.title("Pi comparison")
 
 # plt.figure()
 # plt.plot(kl_C_history, label="C (KL method)")
@@ -2154,12 +2136,127 @@ plt.title("Pi comparison")
 # plt.plot(q2_e_beta_history, label="Q2")
 # plt.legend()
 # plt.title("Comparison test-based Beta evidence")
+"""
+==============
+GOSPA PLOTTING
+==============
+"""
+from matplotlib.dates import num2date, SecondLocator, MicrosecondLocator
+from matplotlib.ticker import FuncFormatter, MultipleLocator
+def plot_gospa(gospa_metrics, gospa_gen_name: str | list[str]):
 
-# plt.figure()
-# plt.plot(process_noise_coeff_memory[0], label="Process noise")
-# plt.plot(meas_std_dev_memory[0][0][0], label="Meas standard deviation")
-# plt.legend()
-# plt.title("Disturbances")
+    if type(gospa_gen_name) != list:
+        gospa_gen_name = [gospa_gen_name]
+    for gen_name in gospa_gen_name:
+        plt.figure()
+        gospa_timesteps = []
+        gospa_distances = []
+        gospa_localisation = []
+        gospa_missed = []
+        gospa_false = []
+        gospa_switching = []
+
+        gospa_time_range_metrics = gospa_metrics[gen_name]['GOSPA Metrics']
+        for single_time_metric in gospa_time_range_metrics.value:
+            gospa_timesteps.append(single_time_metric.timestamp)
+            gospa_distances.append(single_time_metric.value['distance'])
+            gospa_localisation.append(single_time_metric.value['localisation'])
+            gospa_missed.append(single_time_metric.value['missed'])
+            gospa_false.append(single_time_metric.value['false'])
+            gospa_switching.append(single_time_metric.value['switching'])
+
+        ax1 = plt.subplot2grid(shape=(3, 4), loc=(0, 0), colspan=2)
+        ax2 = plt.subplot2grid((3, 4), (0, 2), colspan=2)
+        ax3 = plt.subplot2grid((3, 4), (2, 1), colspan=2)
+        ax4 = plt.subplot2grid((3, 4), (1, 2), colspan=2)
+        ax5 = plt.subplot2grid((3, 4), (1, 0), colspan=2)
+
+
+        def format_date(a, b):
+            t=num2date(a)
+            ms = str(t.microsecond)[:1]
+            res = f"{t.second}.{ms}"
+            return res
+
+        plt.suptitle(f"GOSPA Metrics {gen_name}")
+
+        ax1.set_title("Distance")
+        # ax1.xaxis.set_major_locator(SecondLocator(interval=10))
+        # ax1.xaxis.set_major_formatter(FuncFormatter(format_date))
+        # ax1.xaxis.set_minor_locator(MicrosecondLocator(100000))
+        ax1.set_xlabel("t in seconds")
+        ax1.plot(gospa_distances)
+        # plt.xticks(np.arange(start=start_time, stop=start_time + timedelta(seconds=stop), step=timedelta(seconds=1)))
+
+        ax2.set_title("Localisation")
+        # ax2.xaxis.set_major_locator(SecondLocator(interval=10))
+        # ax2.xaxis.set_major_formatter(FuncFormatter(format_date))
+        # ax2.xaxis.set_minor_locator(MicrosecondLocator(100000))
+        ax2.set_xlabel("t in seconds")
+        ax2.plot(gospa_localisation)
+
+        ax3.set_title("Switching")
+        # ax3.xaxis.set_major_locator(SecondLocator(interval=10))
+        # ax3.xaxis.set_major_formatter(FuncFormatter(format_date))
+        # ax3.xaxis.set_minor_locator(MicrosecondLocator(100000))
+        ax3.set_xlabel("t in seconds")
+        ax3.plot(gospa_switching)
+
+        ax4.set_title("Missed")
+        # ax4.xaxis.set_major_locator(SecondLocator(interval=10))
+        # ax4.xaxis.set_major_formatter(FuncFormatter(format_date))
+        # ax4.xaxis.set_minor_locator(MicrosecondLocator(100000))
+        ax4.set_xlabel("t in seconds")
+        ax4.plot(gospa_missed)
+
+        ax5.set_title("False")
+        # ax5.xaxis.set_major_locator(SecondLocator(interval=10))
+        # ax5.xaxis.set_major_formatter(FuncFormatter(format_date))
+        # ax5.xaxis.set_minor_locator(MicrosecondLocator(100000))
+        ax5.set_xlabel("t in seconds")
+        ax5.plot(gospa_false)
+
+        plt.tight_layout(pad=0, h_pad=-1.4)
+
+    return plt
+# %%
+"""
+======================
+DEFINE METRICS MANAGER 
+======================
+"""
+# load a multi-metric manager
+from stonesoup.metricgenerator.manager import MultiManager
+# Define a data associator between the tracks and the truths
+from stonesoup.dataassociator.tracktotrack import TrackToTruth
+
+stone_soup_tracker = True
+
+c=10
+p=2
+
+
+from stonesoup.metricgenerator.ospametric import GOSPAMetric
+# GOSPA Stone Soup
+if stone_soup_tracker: gospa_kalman = GOSPAMetric(c=c, p=p, generator_name='GOSPA',
+                            tracks_key='tracks',  truths_key='truths', switching_penalty=1)
+
+
+# Use the track associator
+associator = TrackToTruth(association_threshold=30)
+
+# Use a metric manager to deal with the various metrics
+metric_manager = MultiManager([gospa_kalman],
+                              associator)
+
+metric_manager.add_data({'truths' : {truth}}, overwrite=False)
+metric_manager.add_data({'tracks' : {track}}, overwrite=False)
+# print("Number of Stone Soup Tracks:", len(tracks))
+
+# %%
+metrics = metric_manager.generate_metrics()
+
+plt = plot_gospa(metrics, gospa_gen_name=["GOSPA"])
 # %%
 # Plot the resulting track, including uncertainty ellipses
 plotter.plot_tracks(track, [0, 2], uncertainty=True)
@@ -2179,7 +2276,7 @@ fig = plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_h
 # %%
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
-
+show_all_opinion = False
 fig = plotter.fig
 
 fig.set_subplots(
@@ -2194,7 +2291,7 @@ fig.set_subplots(
         "Track", "Global Opinion",
         "H1 Opinion", "H2 Opinion", "H3 Opinion", "H4 Opinion", "H5 Opinion",
         # "H2 Histogram",
-        "H3 Histogram", "H4 Histogram", "H5 Histogram"
+        "H3 Histogram", #"H4 Histogram", "H5 Histogram"
     ],
     vertical_spacing=0.08 ,
     horizontal_spacing=0.01
@@ -2253,12 +2350,14 @@ b_h11, d_h11, u_h11 = h1_1_op_history[0].belief(), h1_1_op_history[0].disbelief(
 b_h12, d_h12, u_h12 = h1_2_op_history[0].belief(), h1_2_op_history[0].disbelief(), h1_2_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h1, u_h11, u_h12],
-        b=[d_h1, d_h11, d_h12],
-        c=[b_h1, b_h11, b_h12],
+        a=[u_h1, u_h11, u_h12] if show_all_opinion else [u_h1],
+        b=[d_h1, d_h11, d_h12]if show_all_opinion else [d_h1],
+        c=[b_h1, b_h11, b_h12]if show_all_opinion else [b_h1],
         mode='markers',
-        marker=dict(size=14, color=['green', 'yellow', 'cyan']),
-        hovertemplate=["H1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H1.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H1.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['green', 'yellow', 'cyan'] if show_all_opinion else ['green']),
+        hovertemplate=["H1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H1.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H1.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["H1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H1"
     ),
     row=3, col=1
@@ -2286,10 +2385,14 @@ b0_ad, d0_ad, u0_ad = opinions_ad[0]
 b_h3, d_h3, u_h3 = h3_ng_op_history[0].belief(), h3_ng_op_history[0].disbelief(), h3_ng_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h3, u0, u0_ad], b=[d_h3, d0, d0_ad], c=[b_h3, b0, b0_ad],
+        a=[u_h3, u0, u0_ad] if show_all_opinion else [u_h3],
+        b=[d_h3, d0, d0_ad] if show_all_opinion else [d_h3],
+        c=[b_h3, b0, b0_ad] if show_all_opinion else [b_h3],
         mode='markers',
-        marker=dict(size=14, color=['green', 'cyan', 'yellow']),
-        hovertemplate=["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['green', 'cyan', 'yellow'] if show_all_opinion else ['green']),
+        hovertemplate=["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]  if show_all_opinion else ["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H3"
     ),
     row=3, col=3
@@ -2314,10 +2417,14 @@ b_h41, d_h41, u_h41 = h4_1_op_history[0].belief(), h4_1_op_history[0].disbelief(
 b_h42, d_h42, u_h42 = h4_2_op_history[0].belief(), h4_2_op_history[0].disbelief(), h4_2_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h4, u_h41, u_h42], b=[d_h4, d_h41, d_h42], c=[b_h4, b_h41, b_h42],
+        a=[u_h4, u_h41, u_h42] if show_all_opinion else [u_h4],
+        b=[d_h4, d_h41, d_h42] if show_all_opinion else [d_h4],
+        c=[b_h4, b_h41, b_h42] if show_all_opinion else [b_h4],
         mode='markers',
-        marker=dict(size=14, color=['green', 'yellow', 'cyan']),
-        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['green', 'yellow', 'cyan'] if show_all_opinion else ['green']),
+        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H4"
     ),
     row=3, col=4
@@ -2358,10 +2465,14 @@ b_h51, d_h51, u_h51 = h5_1_op_history[0].belief(), h5_1_op_history[0].disbelief(
 b_h52, d_h52, u_h52 = h5_2_op_history[0].belief(), h5_2_op_history[0].disbelief(), h5_2_op_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h5, u_h51, u_h52], b=[d_h5, d_h51, d_h52], c=[b_h5, b_h51, b_h52],
+        a=[u_h5, u_h51, u_h52] if show_all_opinion else [u_h5],
+        b=[d_h5, d_h51, d_h52] if show_all_opinion else [d_h5],
+        c=[b_h5, b_h51, b_h52] if show_all_opinion else [b_h5],
         mode='markers',
-        marker=dict(size=14, color=['green', 'yellow', 'cyan']),
-        hovertemplate=["H5<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H5.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "H5.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(size=14, color=['green', 'yellow', 'cyan'] if show_all_opinion else ['green']),
+        hovertemplate=["H5<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H5.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H5.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["H5<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H5"
     ),
     row=3, col=5
@@ -2389,32 +2500,32 @@ fig.add_trace(
     row=4, col=3
 )
 
-fig.add_trace(
-    go.Bar(
-        x=list(range(M)),
-        y=h4_count_history[0],
-        name="H4 counts",
-        marker=dict(color='cyan')
-
-    ),
-    row=4, col=4
-)
-
-fig.add_trace(
-    go.Bar(
-        x=list(range(M)),
-        y=h5_count_history[0],
-        name="H5 counts",
-        marker=dict(color='cyan')
-
-    ),
-    row=4, col=5
-)
+# fig.add_trace(
+#     go.Bar(
+#         x=list(range(M)),
+#         y=h4_count_history[0],
+#         name="H4 counts",
+#         marker=dict(color='cyan')
+#
+#     ),
+#     row=4, col=4
+# )
+#
+# fig.add_trace(
+#     go.Bar(
+#         x=list(range(M)),
+#         y=h5_count_history[0],
+#         name="H5 counts",
+#         marker=dict(color='cyan')
+#
+#     ),
+#     row=4, col=5
+# )
 
 # fig.update_yaxes(range=[0, M**2], row=4, col=2)
 fig.update_yaxes(range=[0, M**2], row=4, col=3)
-fig.update_yaxes(range=[0, M**2], row=4, col=4)
-fig.update_yaxes(range=[0, M**2], row=4, col=5)
+# fig.update_yaxes(range=[0, M**2], row=4, col=4)
+# fig.update_yaxes(range=[0, M**2], row=4, col=5)
 
 n_base = len(fig.data)
 # print(n_base)
@@ -2483,7 +2594,10 @@ for i, frame in enumerate(fig.frames):
                           showlegend=False, cliponaxis=False))
 
     new_data.append(
-        go.Scatterternary(a=[u_h1, u_h11, u_h12], b=[d_h1, d_h11, d_h12], c=[b_h1, b_h11, b_h12], cliponaxis=False)
+        go.Scatterternary(a=[u_h1, u_h11, u_h12] if show_all_opinion else [u_h1],
+                          b=[d_h1, d_h11, d_h12] if show_all_opinion else [d_h1],
+                          c=[b_h1, b_h11, b_h12] if show_all_opinion else [b_h1],
+                          cliponaxis=False)
     )
     new_data.append(
         go.Scatterternary(a=[u_h2], #, u_h21, u_h22],
@@ -2492,7 +2606,10 @@ for i, frame in enumerate(fig.frames):
                           cliponaxis=False)
     )
     new_data.append(
-        go.Scatterternary(a=[u_h3, u, u_ad], b=[d_h3, d, d_ad], c=[b_h3, b, b_ad], cliponaxis=False)
+        go.Scatterternary(a=[u_h3, u, u_ad] if show_all_opinion else [u_h3],
+                          b=[d_h3, d, d_ad] if show_all_opinion else [d_h3],
+                          c=[b_h3, b, b_ad] if show_all_opinion else [b_h3],
+                          cliponaxis=False)
     )
 
     # new_data.append(
@@ -2507,10 +2624,16 @@ for i, frame in enumerate(fig.frames):
     #                       )
     # )
     new_data.append(
-        go.Scatterternary(a=[u_h4, u_h41, u_h42], b=[d_h4, d_h41, d_h42], c=[b_h4, b_h41, b_h42], cliponaxis=False)
+        go.Scatterternary(a=[u_h4, u_h41, u_h42] if show_all_opinion else [u_h4],
+                          b=[d_h4, d_h41, d_h42] if show_all_opinion else [d_h4],
+                          c=[b_h4, b_h41, b_h42] if show_all_opinion else [b_h4],
+                          cliponaxis=False)
     )
     new_data.append(
-        go.Scatterternary(a=[u_h5, u_h51, u_h52], b=[d_h5, d_h51, d_h52], c=[b_h5, b_h51, b_h52], cliponaxis=False)
+        go.Scatterternary(a=[u_h5, u_h51, u_h52] if show_all_opinion else [u_h5],
+                          b=[d_h5, d_h51, d_h52] if show_all_opinion else [d_h5],
+                          c=[b_h5, b_h51, b_h52] if show_all_opinion else [b_h5],
+                          cliponaxis=False)
     )
 
     # new_data.append(
@@ -2519,8 +2642,8 @@ for i, frame in enumerate(fig.frames):
 
     # new_data.append(go.Bar(x=list(range(M)), y=counts_h2))
     new_data.append(go.Bar(x=list(range(M)), y=counts_i))
-    new_data.append(go.Bar(x=list(range(M)), y=counts_h4))
-    new_data.append(go.Bar(x=list(range(M)), y=counts_h5))
+    # new_data.append(go.Bar(x=list(range(M)), y=counts_h4))
+    # new_data.append(go.Bar(x=list(range(M)), y=counts_h5))
 
 
 
