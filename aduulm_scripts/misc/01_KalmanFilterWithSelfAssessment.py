@@ -72,7 +72,7 @@ truth = GroundTruthPath([GroundTruthState([0, 1, 0, 1], timestamp=timesteps[0])]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 10 #16
+disturbance_factor_process = 16 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
@@ -152,7 +152,7 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 1 #4
+disturbance_factor_meas = 5 #4
 gt_measurement_configs = {
     'disturbance_mode': ['jump', 'drift', 'outliers'],
     'parameters': [[[50, 2], [100, 0.5]], [[150, 200, 2.5], [200, 250, 0.4]], [[300, 350, 10, 3]]]
@@ -714,7 +714,7 @@ paper_state = init_paper_akf_state(Q0=Q_nom, R0=R_nom)
 # predicted_state_buffer = deque(maxlen=paper_cfg.N_smooth)
 # measurement_buffer = deque(maxlen=paper_cfg.N_smooth)
 
-N_h2 = 10
+N_h2 = 5
 filtered_state_buffer = deque(maxlen=N_h2 + 1)
 predicted_state_buffer = deque(maxlen=N_h2)
 measurement_buffer = deque(maxlen=N_h2)   # optional für H2 nicht zwingend nötig
@@ -1457,6 +1457,7 @@ for i, measurement in enumerate(measurements):
                 e_beta = 1.0
             else:
                 e_beta = (p_soft - p_h2) / (p_soft - p_hard)
+                print(i, ":", e_beta)
 
             e_alpha = 1.0 - e_beta
 
@@ -1550,188 +1551,6 @@ for i, measurement in enumerate(measurements):
     #       np.allclose(h2_u_history, u_buffer[:len(h2_u_history)]) if len(h2_u_history) <= len(u_buffer) else False)
 
 
-    # # ---------------------------------
-    # # H2: process-noise / dynamics consistency hypothesis
-    # # Proposition: "process-noise / dynamics model is consistent"
-    # # belief     -> Q / dynamics consistent
-    # # disbelief  -> Q / dynamics inconsistent
-    # # ---------------------------------
-    #
-    # # ---- H2.1: smoother-based process-consistency test ----
-    # if len(filtered_state_buffer) == paper_cfg.N_smooth + 1 and len(predicted_state_buffer) == paper_cfg.N_smooth:
-    #     z_window = np.stack(measurement_buffer, axis=0)
-    #
-    #     x_smooth_window, _ = rts_smoother_window(
-    #         list(filtered_state_buffer),
-    #         list(predicted_state_buffer),
-    #         F_paper
-    #     )
-    #
-    #     _, w_hat_seq = estimate_noise_sequences_from_smoothed_states(
-    #         z_window=z_window,
-    #         x_smooth_window=x_smooth_window,
-    #         F=F_paper,
-    #         H=H_paper
-    #     )
-    #
-    #     T_q1 = h2_smoother_process_energy_test(
-    #         w_hat_seq=w_hat_seq,
-    #         Q_ref=Q_nom,
-    #         ridge=1e-6
-    #     )
-    #
-    #     # expected nominal scale is around state dimension if roughly consistent
-    #     n_x = w_hat_seq.shape[1]
-    #     T_q1_excess = max(0.0, T_q1 - n_x)
-    #
-    #     tau_q1 = n_x
-    #     e_beta_1 = 1.0 - np.exp(-T_q1_excess / (tau_q1 + 1e-12))
-    #     e_alpha_1 = 1.0 - e_beta_1
-    #
-    #     h2_logratio_history.append(T_q1)
-    #     h2_ax_var_history.append(T_q1)   # optional: reuse history slot
-    #     h2_ay_var_history.append(T_q1_excess)
-    #
-    #     h2a_alphas *= forget_param
-    #     h2a_alphas += np.array([e_alpha_1, e_beta_1])
-    #     h2a_alphas = np.maximum(h2a_alphas, 1.0)
-    #
-    #     h2_direct1_opinion = make_max_uncertainty_opinion(h2a_alphas)
-    # else:
-    #     h2_direct1_opinion = sl.Opinion(0, 0)
-    #     h2_logratio_history.append(0.0)
-    #     h2_ax_var_history.append(0.0)
-    #     h2_ay_var_history.append(0.0)
-    #
-    # # ---- H2.2: update-effort test ----
-    # N_h2b = 16
-    # if len(update_effort_history) >= N_h2b:
-    #     X_upd = np.asarray(update_effort_history[-N_h2b:])  # shape (N, 4)
-    #     upd_energy = np.mean(np.sum(X_upd**2, axis=1))
-    #     T_h2 = float(np.mean(X_upd))
-    #
-    #     tau_q2 = 0.25
-    #     e_beta_2 = 1.0 - np.exp(-T_h2 / tau_q2)
-    #     e_alpha_2 = 1.0 - e_beta_2
-    #
-    #     h2_update_score_history.append(upd_energy)
-    #
-    #     h2b_alphas *= forget_param
-    #     h2b_alphas += np.array([e_alpha_2, e_beta_2])
-    #     h2b_alphas = np.maximum(h2b_alphas, 1.0)
-    #
-    #     h2_direct2_opinion = make_max_uncertainty_opinion(h2b_alphas)
-    # else:
-    #     h2_direct2_opinion = sl.Opinion(0, 0)
-    #     h2_update_score_history.append(0.0)
-    #
-    # # final H2 fusion: only H2-relevant branches
-    # h2a_op_history.append(h2_direct1_opinion)
-    # h2b_op_history.append(h2_direct2_opinion)
-    #
-    # h2_opinion = h2_direct1_opinion.wb_fuse(h2_direct2_opinion)
-    # h2_q_op_history.append(h2_direct1_opinion)
-
-    # # ============================================================
-    # # PAPER-BASED Q/R ESTIMATION
-    # # ============================================================
-    # q_paper_opinion = sl.Opinion(0, 0)
-    # r_paper_opinion = sl.Opinion(0, 0)
-    #
-    # if (
-    #     len(filtered_state_buffer) == paper_cfg.N_smooth + 1
-    #     and len(predicted_state_buffer) == paper_cfg.N_smooth
-    #     and len(measurement_buffer) == paper_cfg.N_smooth
-    # ):
-    #     # RTS smoother on the current fixed window
-    #     x_smooth_window, P_smooth_window = rts_smoother_window(
-    #         filtered_states=list(filtered_state_buffer),
-    #         predicted_states=list(predicted_state_buffer),
-    #         F=F_paper,
-    #     )
-    #
-    #     z_window = np.stack(list(measurement_buffer), axis=0)
-    #
-    #     # Reconstruct estimated measurement/process noise sequences
-    #     v_hat_seq, w_hat_seq = estimate_noise_sequences_from_smoothed_states(
-    #         z_window=z_window,
-    #         x_smooth_window=x_smooth_window,
-    #         F=F_paper,
-    #         H=H_paper,
-    #     )
-    #
-    #     # Exact paper weighting factors
-    #     dv, dw = compute_weighting_factors_exact(
-    #         F=F_paper,
-    #         H=H_paper,
-    #         Q=paper_state.Q_est,
-    #         R=paper_state.R_est,
-    #         N=paper_cfg.N_smooth,
-    #         eps=paper_cfg.eps,
-    #     )
-    #
-    #     dv_history_paper.append(dv.copy())
-    #     dw_history_paper.append(dw.copy())
-    #
-    #     upd = update_paper_sums_and_covariances(
-    #         paper_state=paper_state,
-    #         v_hat_seq=v_hat_seq,
-    #         w_hat_seq=w_hat_seq,
-    #         dv=dv,
-    #         dw=dw,
-    #         cfg=paper_cfg,
-    #     )
-    #
-    #     if upd is not None:
-    #         sigma_w2_hat, sigma_v2_hat, Q_hat, R_hat = upd
-    #
-    #         Q_hat_paper_history.append(Q_hat.copy())
-    #         R_hat_paper_history.append(R_hat.copy())
-    #
-    #         # ------------------------------------------------
-    #         # YOUR APPLICATION: diagnostics -> SL opinions
-    #         # ------------------------------------------------
-    #         d_q_paper = covariance_deviation_score(Q_hat, Q_nom, eps=paper_cfg.eps)
-    #         d_r_paper = covariance_deviation_score(R_hat, R_nom, eps=paper_cfg.eps)
-    #
-    #         # use rational mapping to avoid immediate saturation
-    #         p_q_paper = deviation_to_probability_rational(d_q_paper, tau_q_paper_map)
-    #         p_r_paper = deviation_to_probability_rational(d_r_paper, tau_r_paper_map)
-    #
-    #         p_q_paper_history.append(p_q_paper)
-    #         p_r_paper_history.append(p_r_paper)
-    #
-    #         q_paper_alphas = np.array([1.0 + (1.0 - p_q_paper), 1.0 + p_q_paper])
-    #         r_paper_alphas = np.array([1.0 + (1.0 - p_r_paper), 1.0 + p_r_paper])
-    #
-    #         q_paper_dist = sl.DirichletDistribution2d(q_paper_alphas)
-    #         r_paper_dist = sl.DirichletDistribution2d(r_paper_alphas)
-    #
-    #         q_paper_opinion = q_paper_dist.as_opinion()
-    #         r_paper_opinion = r_paper_dist.as_opinion()
-    #
-    # # q_paper_op_obj_history.append(q_paper_opinion)
-    # # r_paper_op_obj_history.append(r_paper_opinion)
-    #
-    # if len(Q_hat_paper_history) > 0:
-    #     last_q_paper = p_q_paper_history[-1]
-    #     last_r_paper = p_r_paper_history[-1]
-    #     # last_q_op = q_paper_op_obj_history[-1]
-    #     # last_r_op = r_paper_op_obj_history[-1]
-    # else:
-    #     last_q_paper = 0.0
-    #     last_r_paper = 0.0
-    #     last_q_op = sl.Opinion(0, 0)
-    #     last_r_op = sl.Opinion(0, 0)
-    #
-    # # if no fresh update was generated this step, repeat last value
-    # if len(p_q_paper_history) < i + 1:
-    #     p_q_paper_history.append(last_q_paper)
-    #     p_r_paper_history.append(last_r_paper)
-    #     # q_paper_op_obj_history.append(last_q_op)
-    #     # r_paper_op_obj_history.append(last_r_op)
-
-
 
     # Fusion of Opinions
     # fused_kl_ad = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, opinion, ad_opinion)
@@ -1749,6 +1568,7 @@ for i, measurement in enumerate(measurements):
     #     ad_opinion
     # )
     h3_opinion = kl_opinion.wb_fuse(ad_opinion)
+    # h3_opinion = kl_opinion
     h3_ng_op_history.append(h3_opinion)
 
     fused_op_obj_history.append(h3_opinion)   # optional: keep old history for plotting
@@ -1777,8 +1597,9 @@ for i, measurement in enumerate(measurements):
     for h in h_opinions:
         w_all.append(BiOpinion(h.belief(), h.disbelief(), h.prior_belief(), h.uncertainty()))
 
-    global_opinion_ss = fusion_weighted_belief(w_all)
-    global_opinion = sl.Opinion(global_opinion_ss.belief[0], global_opinion_ss.belief[1])
+    # global_opinion_ss = fusion_weighted_belief(w_all)
+    # global_opinion = sl.Opinion(global_opinion_ss.belief[0], global_opinion_ss.belief[1])
+    global_opinion = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, h_opinions)
     global_op_history.append(global_opinion)
 
     belief_history.append(global_opinion.belief())
@@ -2074,10 +1895,10 @@ for i, measurement in enumerate(measurements):
 # plt.figure()
 # plt.plot(ad_history)
 # plt.title("AD score")
-# plt.figure()
-# plt.plot(h2_u_values, label="H2 u history")
-# plt.plot(u_history, label="H3 u history")
-# plt.title("Score history")
+plt.figure()
+plt.plot(h2_p_history, label="H2 p history")
+plt.plot(h2_multistep_score_history, label="H2 score history")
+plt.title("Score history")
 # plt.legend()
 # plt.figure()
 # plt.plot(h2_C_history, label="H2 C-value")
@@ -2088,9 +1909,15 @@ for i, measurement in enumerate(measurements):
 # plt.title("Test history")
 # plt.legend()
 plt.figure()
-# plt.plot(belief_history, label="Belief")
+plt.plot(belief_history, label="Belief")
 # plt.plot(disbelief_history, label="Disbelief")
-# plt.plot(uncertainty_history, label="Uncertainty")
+plt.plot(uncertainty_history, label="Uncertainty")
+plt.plot(p_s_history, label="Projection")
+plt.legend()
+plt.title("Global Opinion")
+plt.figure()
+plt.plot(decision_history, label="Decision")
+plt.figure()
 plt.plot([0, len(belief_history)], [0.5, 0.5], "r--")
 plt.plot(p_s_history, label="Projection (global)", linewidth=3, zorder=100)
 plt.plot([h1.getProjection()[0] for h1 in h1_r_op_history], label="Projection (H1)")
@@ -2143,7 +1970,7 @@ GOSPA PLOTTING
 """
 from matplotlib.dates import num2date, SecondLocator, MicrosecondLocator
 from matplotlib.ticker import FuncFormatter, MultipleLocator
-def plot_gospa(gospa_metrics, gospa_gen_name: str | list[str]):
+def plot_gospa(gospa_metrics, gospa_gen_name: str | list[str], plot_switching=False):
 
     if type(gospa_gen_name) != list:
         gospa_gen_name = [gospa_gen_name]
@@ -2165,11 +1992,17 @@ def plot_gospa(gospa_metrics, gospa_gen_name: str | list[str]):
             gospa_false.append(single_time_metric.value['false'])
             gospa_switching.append(single_time_metric.value['switching'])
 
-        ax1 = plt.subplot2grid(shape=(3, 4), loc=(0, 0), colspan=2)
-        ax2 = plt.subplot2grid((3, 4), (0, 2), colspan=2)
-        ax3 = plt.subplot2grid((3, 4), (2, 1), colspan=2)
-        ax4 = plt.subplot2grid((3, 4), (1, 2), colspan=2)
-        ax5 = plt.subplot2grid((3, 4), (1, 0), colspan=2)
+        if plot_switching:
+            ax1 = plt.subplot2grid(shape=(3, 4), loc=(0, 0), colspan=2)
+            ax2 = plt.subplot2grid((3, 4), (0, 2), colspan=2)
+            ax3 = plt.subplot2grid((3, 4), (1, 2), colspan=2)
+            ax4 = plt.subplot2grid((3, 4), (1, 0), colspan=2)
+            ax5 = plt.subplot2grid((3, 4), (2, 1), colspan=2)
+        else:
+            ax1 = plt.subplot2grid(shape=(2, 4), loc=(0, 0), colspan=2)
+            ax2 = plt.subplot2grid((2, 4), (0, 2), colspan=2)
+            ax3 = plt.subplot2grid((2, 4), (1, 2), colspan=2)
+            ax4 = plt.subplot2grid((2, 4), (1, 0), colspan=2)
 
 
         def format_date(a, b):
@@ -2195,28 +2028,29 @@ def plot_gospa(gospa_metrics, gospa_gen_name: str | list[str]):
         ax2.set_xlabel("t in seconds")
         ax2.plot(gospa_localisation)
 
-        ax3.set_title("Switching")
-        # ax3.xaxis.set_major_locator(SecondLocator(interval=10))
-        # ax3.xaxis.set_major_formatter(FuncFormatter(format_date))
-        # ax3.xaxis.set_minor_locator(MicrosecondLocator(100000))
-        ax3.set_xlabel("t in seconds")
-        ax3.plot(gospa_switching)
-
-        ax4.set_title("Missed")
+        ax3.set_title("Missed")
         # ax4.xaxis.set_major_locator(SecondLocator(interval=10))
         # ax4.xaxis.set_major_formatter(FuncFormatter(format_date))
         # ax4.xaxis.set_minor_locator(MicrosecondLocator(100000))
-        ax4.set_xlabel("t in seconds")
-        ax4.plot(gospa_missed)
+        ax3.set_xlabel("t in seconds")
+        ax3.plot(gospa_missed)
 
-        ax5.set_title("False")
+        ax4.set_title("False")
         # ax5.xaxis.set_major_locator(SecondLocator(interval=10))
         # ax5.xaxis.set_major_formatter(FuncFormatter(format_date))
         # ax5.xaxis.set_minor_locator(MicrosecondLocator(100000))
-        ax5.set_xlabel("t in seconds")
-        ax5.plot(gospa_false)
+        ax4.set_xlabel("t in seconds")
+        ax4.plot(gospa_false)
 
-        plt.tight_layout(pad=0, h_pad=-1.4)
+        if plot_switching:
+            ax5.set_title("Switching")
+            # ax3.xaxis.set_major_locator(SecondLocator(interval=10))
+            # ax3.xaxis.set_major_formatter(FuncFormatter(format_date))
+            # ax3.xaxis.set_minor_locator(MicrosecondLocator(100000))
+            ax5.set_xlabel("t in seconds")
+            ax5.plot(gospa_switching)
+
+        plt.tight_layout()
 
     return plt
 # %%
