@@ -117,7 +117,7 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 1 #4
+disturbance_factor_meas = 2 #4
 gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 2], [100, 0.5]], [[150, 250, 2.5], [250, 300, 0.4]], [[350, 400, 2, 5]]]
@@ -418,7 +418,7 @@ kl_opinion = sl.Opinion(0, 0)
 # Additional diagnostic channels
 # ------------------------------------------------------------------
 from scipy.stats import norm, chi2
-# from collections import deque
+from collections import deque
 
 
 # Per-timestep opinions for new channels
@@ -1243,7 +1243,7 @@ fig.add_trace(
 # )
 
 # fig.update_yaxes(range=[0, M**2], row=4, col=2)
-fig.update_yaxes(range=[0, M**2], row=4, col=3)
+fig.update_yaxes(range=[0, SHORT_WINDOW_SIZE], row=4, col=4)
 # fig.update_yaxes(range=[0, M**2], row=4, col=4)
 # fig.update_yaxes(range=[0, M**2], row=4, col=5)
 
