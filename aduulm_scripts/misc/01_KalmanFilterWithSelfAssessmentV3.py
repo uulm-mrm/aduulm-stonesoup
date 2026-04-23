@@ -26,12 +26,12 @@ from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionM
 # And the clock starts
 start_time = datetime.now().replace(microsecond=0)
 
-np.random.seed(1991)  # 1991
+np.random.seed(1991+5)  # 1991
 
 # %%
 # factor = 100
-q_x = .001 #0.1
-q_y = .001 #0.1
+q_x = 1 #0.1
+q_y = 1 #0.1
 transition_model = CombinedLinearGaussianTransitionModel([ConstantVelocity(q_x),
                                                           ConstantVelocity(q_y)])
 
@@ -40,7 +40,7 @@ stationary_transition_model = deepcopy(transition_model)
 # A 'truth path' is created starting at (0,0) moving to the NE at one distance unit per (time)
 # step in each dimension.
 timesteps = [start_time]
-truth = GroundTruthPath([GroundTruthState([0, .01, 0, .01], timestamp=timesteps[0])])
+truth = GroundTruthPath([GroundTruthState([0, 1, 0, 1], timestamp=timesteps[0])])
 
 
 # Import the disturbance method for the transition model
@@ -51,7 +51,7 @@ gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
-    'parameters': [[[500, disturbance_factor_process], [600, 1/disturbance_factor_process]]]
+    'parameters': [[[500, disturbance_factor_process], [800, 1/disturbance_factor_process]]]
 }
 process_noise_coeff_memory = [[], []]
 
@@ -99,8 +99,8 @@ import numpy as np
 measurement_model = LinearGaussian(
     ndim_state=4,  # Number of state dimensions (position and velocity in 2D)
     mapping=(0, 2),  # Mapping measurement vector index to state index
-    noise_covar=np.array([[.01, 0],  # Covariance matrix for Gaussian PDF
-                          [0, .01]])
+    noise_covar=np.array([[.2, 0],  # Covariance matrix for Gaussian PDF
+                          [0, .2]])
     )
 # %%
 # Check the output is as we expect
@@ -117,10 +117,10 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 2 #4
+disturbance_factor_meas = 1 #4
 gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
-    # 'parameters': [[[50, 2], [100, 0.5]], [[150, 200, 2.5], [200, 250, 0.4]], [[300, 350, 10, 3]]]
+    # 'parameters': [[[50, 2], [100, 0.5]], [[150, 250, 2.5], [250, 300, 0.4]], [[350, 400, 2, 5]]]
     'disturbance_mode': ['jump'],
     'parameters': [[[100, disturbance_factor_meas], [200, 1/disturbance_factor_meas], [300, 1/disturbance_factor_meas], [400, disturbance_factor_meas]]]
 }
@@ -213,12 +213,12 @@ def calculate_lt_evidence(W: int, alpha=0.99):
 # eSLIM++ LTST Buffer
 SHORT_WINDOW_SIZE = 35
 W = 7
-DISCOUNT = 0.999
+DISCOUNT = 0.99
 
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.01)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
-THRESHOLD = calibrate_entropy_threshold(W, SHORT_WINDOW_SIZE, 0.01)
+THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
 print("Threshold for LTST:", THRESHOLD)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
@@ -227,70 +227,19 @@ HANDLE_ST_CONFLICT = False
 AVG_DC_CONFLICT_HANDLING = False
 
 ltst = eval(f"sl.LongShortTermMemory{W}d")(
-    SHORT_WINDOW_SIZE, griebel_threshold, DISCOUNT, FUSION_TYPE, HANDLE_ST_CONFLICT, AVG_DC_CONFLICT_HANDLING
+    SHORT_WINDOW_SIZE, THRESHOLD, DISCOUNT, FUSION_TYPE, HANDLE_ST_CONFLICT, AVG_DC_CONFLICT_HANDLING
 )
+ltst_component_x = eval(f"sl.LongShortTermMemory{W}d")(
+    SHORT_WINDOW_SIZE, THRESHOLD, DISCOUNT, FUSION_TYPE, HANDLE_ST_CONFLICT, AVG_DC_CONFLICT_HANDLING
+)
+ltst_component_y = eval(f"sl.LongShortTermMemory{W}d")(
+    SHORT_WINDOW_SIZE, THRESHOLD, DISCOUNT, FUSION_TYPE, HANDLE_ST_CONFLICT, AVG_DC_CONFLICT_HANDLING
+)
+component_x_buffered = []
+component_y_buffered = []
 
 ops = []
 ops_per_timestep = []
-
-def chisquare_uniform_test(counts, alpha=0.05):
-    """
-    Pearson chi-square goodness-of-fit test against the uniform distribution.
-
-    Parameters
-    ----------
-    counts : array-like
-        Observed category counts [N1, ..., NW].
-    alpha : float
-        Significance level, e.g. 0.05 or 0.01.
-
-    Returns
-    -------
-    result : dict
-        {
-            "statistic": X2,
-            "df": W - 1,
-            "critical_value": tau_alpha,
-            "p_value": p,
-            "reject_H0": bool
-        }
-    """
-    counts = np.asarray(counts, dtype=float)
-
-    if counts.ndim != 1:
-        raise ValueError("counts must be a 1D array.")
-    if np.any(counts < 0):
-        raise ValueError("counts must be nonnegative.")
-    # if not np.allclose(counts, np.round(counts)):
-        # raise ValueError("counts should be integer-valued frequencies.")
-    if not (0 < alpha < 1):
-        raise ValueError("alpha must be in (0,1).")
-
-    n_s = counts.sum()
-    W = len(counts)
-
-    if W < 2:
-        raise ValueError("Need at least 2 categories.")
-    if n_s <= 0:
-        raise ValueError("Total sample size must be positive.")
-
-    expected = np.full(W, n_s / W)
-
-    # Pearson chi-square statistic
-    X2 = np.sum((counts - expected) ** 2 / expected)
-
-    df = W - 1
-    critical_value = chi2.ppf(1.0 - alpha, df=df)
-    p_value = 1.0 - chi2.cdf(X2, df=df)
-
-    return {
-        "statistic": float(X2),
-        "df": int(df),
-        "critical_value": float(critical_value),
-        "p_value": float(p_value),
-        "reject_H0": bool(X2 > critical_value),
-    }
-
 
 import scipy.linalg
 from datetime import timedelta
@@ -359,9 +308,22 @@ def compute_stationary_kf_quantities(transition_model, measurement_model, prior)
         "sigma_R": sigma_R,
     }
 
+def scalar_u_to_opinion(u: float, W: int):
+    """
+    Map a scalar u in [0,1] to a W-dimensional one-hot evidence opinion.
+    """
+    u = float(np.clip(u, 0.0, 1.0))
+    evidence = np.zeros(W, dtype=float)
+
+    # Bin index in {0, ..., W-1}
+    idx = min(int(np.floor(u * W)), W - 1)
+    evidence[idx] = 1.0
+
+    dist = eval(f"sl.DirichletDistribution{W}d").from_evidences(evidence)
+    return dist.as_opinion()
 # %%
 from stonesoup.types.state import GaussianState
-prior = GaussianState([[0], [.01], [0], [.01]], np.diag([.5, 0.1, .5, 0.1]), timestamp=start_time)
+prior = GaussianState([[0], [1], [0], [1]], np.diag([0.5, 1, 0.5, 1]), timestamp=start_time)
 
 # %%
 from stonesoup.types.hypothesis import SingleHypothesis
@@ -411,6 +373,7 @@ u_history = []
 C_history = []
 K_history = []
 eta_history = []
+nu_white_history = []
 counts_history = []
 
 
@@ -450,6 +413,18 @@ from ordered_set import OrderedSet
 tracks = set([Track([])])
 truths = set([GroundTruthPath([truth])])
 kl_opinion = sl.Opinion(0, 0)
+
+# ------------------------------------------------------------------
+# Additional diagnostic channels
+# ------------------------------------------------------------------
+from scipy.stats import norm, chi2
+# from collections import deque
+
+
+# Per-timestep opinions for new channels
+ops_component_x = []
+ops_component_y = []
+
 
 for i, measurement in enumerate(measurements):
     prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
@@ -500,7 +475,29 @@ for i, measurement in enumerate(measurements):
     # -----------------------------
     S_sqrt = np.linalg.cholesky(S)
     nu_white = np.linalg.solve(S_sqrt, delta).flatten()
+    nu_white_history.append(nu_white.copy())
+    if len(nu_white_history) > max_buffer:
+        nu_white_history.pop(0)
 
+    # # ------------------------------------------------------------------
+    # # 1) Store current whitened innovation in bounded rolling buffers
+    # # ------------------------------------------------------------------
+    # nu_white_x_buffer.append(float(nu_white[0]))
+    # nu_white_y_buffer.append(float(nu_white[1]))
+
+    # ------------------------------------------------------------------
+    # 2) Component-wise Gaussian consistency opinion
+    # H0: each whitened component ~ N(0,1)
+    # PIT: u = Phi(nu_white_j)
+    # ------------------------------------------------------------------
+    u_comp_x = norm.cdf(float(nu_white[0]))
+    u_comp_y = norm.cdf(float(nu_white[1]))
+
+    op_comp_x = scalar_u_to_opinion(u_comp_x, W)
+    op_comp_y = scalar_u_to_opinion(u_comp_y, W)
+
+    ops_component_x.append(op_comp_x)
+    ops_component_y.append(op_comp_y)
 
     d2 = (delta.T @ np.linalg.inv(S) @ delta).item()
     u = chi2.cdf(d2, df=m)
@@ -714,6 +711,7 @@ op_ref = eval(f"sl.Opinion{W}d")(*([1/W]*W))
 
 entropy_opinions = []
 sums_of_evidence = []
+sums_of_evidence_comp = []
 evidences = []
 
 for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_timestep)):
@@ -726,9 +724,9 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
         _, lt_op_prior = conflict
     else:
         lt_op_prior = lt_op
-    print("idx:", idx)
-    print("len of st:", ltst.get_short_size())
-    print("len of lt:", ltst.get_long_size())
+    # print("idx:", idx)
+    # print("len of st:", ltst.get_short_size())
+    # print("len of lt:", ltst.get_long_size())
 
     # write results to buffers
     # inp[idx, :] = (op_obs.getBinomialProjection(), op_obs.uncertainty())
@@ -749,6 +747,34 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     entropy = 1 - entropy
     entropy_opinions.append(entropy)
 
+for opx, opy in zip(
+    ops_component_x, ops_component_y,
+):
+    ltst_component_x.add(opx)
+    ltst_component_y.add(opy)
+
+
+    component_x_buffered.append(ltst_component_x.get_opinion())
+    component_y_buffered.append(ltst_component_y.get_opinion())
+
+# dc_white_x = [white_x.degree_of_conflict(op_ref) for white_x in whiteness_x_buffered]
+# dc_white_y = [white_y.degree_of_conflict(op_ref) for white_y in whiteness_y_buffered]
+dc_comp_x = [comp_x.degree_of_conflict(op_ref) for comp_x in component_x_buffered]
+dc_comp_y = [comp_y.degree_of_conflict(op_ref) for comp_y in component_y_buffered]
+component_buffered = []
+whiteness_buffered = []
+
+for opx, opy in zip(component_x_buffered, component_y_buffered):
+    fused_comp = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, [opx, opy])
+    component_buffered.append(fused_comp)
+    sums_of_evidence_comp.append(int(sum(fused_comp.as_dirichlet().evidences)))
+
+# for opx, opy in zip(whiteness_x_buffered, whiteness_y_buffered):
+#     fused_white = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, [opx, opy])
+#     whiteness_buffered.append(fused_white)
+
+# dc_whiteness = [white.degree_of_conflict(op_ref) for white in whiteness_buffered]
+dc_comp = [comp.degree_of_conflict(op_ref) for comp in component_buffered]
 
 # for i, _ in enumerate(dc_st_lt):
 #     assert np.isclose(dc_ltst[i], dc_st_lt[i]), f"{i}, {dc_ltst[i]}, {dc_st_lt[i]}"
@@ -765,14 +791,14 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
 # plt.legend()
 # plt.title("Dynamic Threshold")
 
-plt.figure()
-# plt.plot(inp[:, 0], label="Inp")
-# plt.plot(inp[:, 1], label="Inp u")
-plt.plot(buffer[:, 0], label="PP")
-plt.plot(st_buffer[:, 0], label="st")
-plt.plot(lt_buffer[:, 0], label="lt")
-plt.legend()
-plt.title("LTST Buffer")
+# plt.figure()
+# # plt.plot(inp[:, 0], label="Inp")
+# # plt.plot(inp[:, 1], label="Inp u")
+# plt.plot(buffer[:, 0], label="PP")
+# plt.plot(st_buffer[:, 0], label="st")
+# plt.plot(lt_buffer[:, 0], label="lt")
+# plt.legend()
+# plt.title("LTST Buffer")
 
 plt.figure()
 plt.plot(buffer[:, 1], label="u")
@@ -790,26 +816,65 @@ with open("opinion_threshold_smoothed.json", 'r') as f:
 plt.figure()
 
 # plt.plot(resets, label="Reset")
-plt.plot(dc_ref, label="DC Ref")
+plt.plot(dc_ref, label="DC Radial")
 # plt.plot(dc_ltst, label="DC LTST")
 # plt.plot(entropy_opinions, label="Entropy")
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT)+SHORT_WINDOW_SIZE, alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT+ST")
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT")
 # plt.plot([entropy_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Entropy Th Dynamic")
-plt.plot([opinion_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Opinion Th Dynamic")
-plt.plot([calc_threshold_n_diff(W, s, 0.1) for s in sums_of_evidence], label = "Griebel Th Dynamic")
+plt.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence], label = "Th Radial")
+# plt.plot([calc_threshold_n_diff(W, s, 0.1) for s in sums_of_evidence], label = "Griebel Th Dynamic")
 # plt.plot(kl_C_history, label="KL C")
 plt.yticks(np.linspace(0, 1, 11))
 plt.grid()
 plt.legend()
-plt.title("DC and Entropy")
+plt.title("DCs")
+
+fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+# --- Radial ---
+ax1.plot(dc_ref, label="DC Radial")
+ax1.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence],
+         label="Th Radial")
+ax1.set_title("Radial")
+ax1.grid()
+ax1.legend()
+# --- Comp ---
+ax2.plot(dc_comp, label="DC Comp")
+ax2.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_comp],
+         label="Th Comp")
+ax2.set_title("Comp")
+ax2.grid()
+ax2.legend()
+# Gemeinsamer Titel
+fig.suptitle("DC Global")
+plt.tight_layout()
 
 # print(calculate_lt_evidence(W, DISCOUNT)+SHORT_WINDOW_SIZE)
+# plt.figure()
+# # plt.plot(dc_ltst, label="DC LTST")
+# plt.plot(dc_ref, label="DC Radial")
+# plt.plot(dc_comp, label="DC Comp")
+# plt.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence], label = "Th Radial")
+# plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_comp], label="Th Comp")
+# # plt.plot(dc_whiteness, label="DC Whiteness")
+# plt.legend()
+# plt.grid()
+# plt.title("DC Global")
 
 plt.figure()
-plt.plot([chisquare_uniform_test(e, 0.01)['reject_H0'] for e in evidences], label="Reject H0")
+# plt.plot(dc_ltst, label="DC LTST")
+# plt.plot(dc_white_x, label="DC White X")
+# plt.plot(dc_white_y, label="DC White Y")
+plt.plot(dc_comp_x, label="DC Comp X")
+plt.plot(dc_comp_y, label="DC Comp Y")
 plt.legend()
-plt.title("Chi-Square")
+plt.grid()
+plt.title("DC Local")
+
+# plt.figure()
+# plt.plot([chisquare_uniform_test(e, 0.01)['reject_H0'] for e in evidences], label="Reject H0")
+# plt.legend()
+# plt.title("Chi-Square")
 # %%
 """
 ==============
@@ -964,10 +1029,10 @@ fig = plotter.fig
 fig.set_subplots(
     rows=4, cols=5,
     specs=[
-        [{"colspan": 2, "rowspan": 2},  None,                   None,                   {"colspan": 2, "rowspan": 2, "type": "ternary"}, None],              # Zeile 1
+        [{"colspan": 3, "rowspan": 3},  None,                   None,                   {"colspan": 2, "rowspan": 2, "type": "ternary"}, None],              # Zeile 1
         [None,                          None,                   None,                   None,                   None                ],        # Zeile 2
-        [None,                          None,                   {"type": "ternary"},    None,                   None],        # Zeile 3
-        [None,                          None,                   {"type": "xy"},         {"type": "xy"},         {"type": "xy"}      ]
+        [None,                          None,                   None,                   {"type": "ternary"},    None                ],        # Zeile 3
+        [None,                          None,                   None,                   {"type": "xy"},         {"type": "xy"}      ]
     ],
     subplot_titles=[
         "Track", "Global Opinion",
@@ -1079,7 +1144,7 @@ fig.add_trace(
                        "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]  if show_all_opinion else ["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
         name="H3"
     ),
-    row=3, col=3
+    row=3, col=4
 )
 
 # fig.add_trace(
@@ -1152,7 +1217,7 @@ fig.add_trace(
         marker=dict(color='cyan')
 
     ),
-    row=4, col=3
+    row=4, col=4
 )
 
 # fig.add_trace(
