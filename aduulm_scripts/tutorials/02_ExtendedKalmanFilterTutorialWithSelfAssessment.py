@@ -279,8 +279,10 @@ plotter.fig
 # %%
 # Plot the self-assessment measures
 from aduulm_scripts.utils.plotting import plot_selfassessment_with_nis
-plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
+fig = plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_history, nis_settings["alpha"],
                              assessor_type='KalmanSelfAssessor')
+
+fig.show()
 
 # %%
 # Key points

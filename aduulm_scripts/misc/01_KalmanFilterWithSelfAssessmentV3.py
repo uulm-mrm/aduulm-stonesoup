@@ -30,8 +30,8 @@ np.random.seed(1991+5)  # 1991
 
 # %%
 # factor = 100
-q_x = 1 #0.1
-q_y = 1 #0.1
+q_x = 0.05 #1 #0.1
+q_y = 0.05 #1 #0.1
 transition_model = CombinedLinearGaussianTransitionModel([ConstantVelocity(q_x),
                                                           ConstantVelocity(q_y)])
 
@@ -49,6 +49,7 @@ disturbance_factor_process = 16 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
+    'disturb_noise_coeff': [False, True],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
     'parameters': [[[700, disturbance_factor_process], [800, 1/disturbance_factor_process]]]
@@ -99,8 +100,8 @@ import numpy as np
 measurement_model = LinearGaussian(
     ndim_state=4,  # Number of state dimensions (position and velocity in 2D)
     mapping=(0, 2),  # Mapping measurement vector index to state index
-    noise_covar=np.array([[.2, 0],  # Covariance matrix for Gaussian PDF
-                          [0, .2]])
+    noise_covar=np.array([[.01, 0],  # Covariance matrix for Gaussian PDF
+                          [0, .01]])
     )
 # %%
 # Check the output is as we expect
@@ -140,8 +141,8 @@ for k, state in enumerate(truth):
 
 # %%
 meas_bias_memory = []
-x_bias = 2
-y_bias = -2
+x_bias = 1
+y_bias = -1
 for i, measurement in enumerate(measurements):
     if 600 <= i <= 650:
         measurement.state_vector += np.array([[x_bias], [y_bias]])
@@ -172,7 +173,7 @@ sa_settings = {
     "n_st": 35,
     "n_c": 1,
     "dim_meas": measurement_model.ndim_meas,
-    "alpha_threshold_dc": 0.1,
+    "alpha_threshold_dc": 0.01,
     "trust_discount": 0.99,
 }
 selfassessor = KalmanSelfAssessor(num_X=sa_settings["num_X"],
@@ -234,7 +235,7 @@ SHORT_WINDOW_SIZE = 35
 W = 7
 DISCOUNT = 0.99
 
-griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.01)
+griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
 THRESHOLD = calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
@@ -873,6 +874,7 @@ plt.plot([meas_std_dev_memory[i][0, 0] for i, mat in enumerate(meas_std_dev_memo
 plt.plot([meas_bias_memory[i][0] for i in range(len(meas_bias_memory))], label="bias x")
 plt.plot([meas_bias_memory[i][1] for i in range(len(meas_bias_memory))], label="bias y")
 plt.legend()
+plt.grid()
 plt.title("Disturbances")
 
 # plt.figure()

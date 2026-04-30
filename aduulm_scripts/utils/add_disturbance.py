@@ -52,8 +52,8 @@ def disturbance_transition_model(transition_model, gt_configs, k):
             for z in range(len(gt_configs['parameters'][idx_dist_mode])):
                 if k == gt_configs['parameters'][idx_dist_mode][z][0]:
                     # Apply jump disturbance
-                    for model in transition_model.model_list:
-                        model.noise_diff_coeff *= gt_configs['parameters'][idx_dist_mode][z][1]
+                    for i, model in enumerate(transition_model.model_list):
+                        model.noise_diff_coeff *= gt_configs['parameters'][idx_dist_mode][z][1] if gt_configs['disturb_noise_coeff'][i] else 1
 
         elif dist_mode.lower() == 'drift':
             for z in range(len(gt_configs['parameters'][idx_dist_mode])):
