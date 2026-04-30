@@ -97,6 +97,7 @@ from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
+    'disturb_noise_coeff': [True, True],
     'disturbance_mode': ['jump'],
     'parameters': [[[1100, 16.0], [1300, 0.0625]]]
 }

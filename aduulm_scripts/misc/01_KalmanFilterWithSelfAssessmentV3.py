@@ -235,10 +235,16 @@ SHORT_WINDOW_SIZE = 35
 W = 7
 DISCOUNT = 0.99
 
+import json
+with open("entropy_threshold.json", 'r') as f:
+    entropy_thresholds = json.load(f)
+with open("opinion_threshold_smoothed.json", 'r') as f:
+    opinion_thresholds = json.load(f)
+
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
-THRESHOLD = calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
+THRESHOLD = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, DISCOUNT)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
 print("Threshold for LTST:", THRESHOLD)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
@@ -861,18 +867,13 @@ dc_comp = [comp.degree_of_conflict(op_ref) for comp in component_buffered]
 # for i, _ in enumerate(dc_st_lt):
 #     assert np.isclose(dc_ltst[i], dc_st_lt[i]), f"{i}, {dc_ltst[i]}, {dc_st_lt[i]}"
 
-import json
-with open("entropy_threshold.json", 'r') as f:
-    entropy_thresholds = json.load(f)
-with open("opinion_threshold_smoothed.json", 'r') as f:
-    opinion_thresholds = json.load(f)
 
 plt.figure()
 plt.plot(process_noise_coeff_memory[0], label="q_x")
 plt.plot(process_noise_coeff_memory[1], label="q_y")
 plt.plot([meas_std_dev_memory[i][0, 0] for i, mat in enumerate(meas_std_dev_memory)], label="meas_cov")
-plt.plot([meas_bias_memory[i][0] for i in range(len(meas_bias_memory))], label="bias x")
-plt.plot([meas_bias_memory[i][1] for i in range(len(meas_bias_memory))], label="bias y")
+# plt.plot([meas_bias_memory[i][0] for i in range(len(meas_bias_memory))], label="bias x")
+# plt.plot([meas_bias_memory[i][1] for i in range(len(meas_bias_memory))], label="bias y")
 plt.legend()
 plt.grid()
 plt.title("Disturbances")
