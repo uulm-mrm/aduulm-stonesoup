@@ -30,13 +30,13 @@ from stonesoup.types.array import StateVector, CovarianceMatrix
 from stonesoup.types.state import State, GaussianState
 
 start_time = datetime.now()
-np.random.seed(3) #2
+np.random.seed(20) #2
 
 # %%
 use_ct_model = True
 
-q_x   = 0.05   # Geschwindigkeitsrauschen (σ_vvel)
-q_y   = 0.05
+q_x   = 0.25   # Geschwindigkeitsrauschen (σ_vvel)
+q_y   = 0.25
 if use_ct_model:
     q_phi = 0.01   # Drehraten-Rauschen (σ_omega)
     transition_model = ConstantTurn([q_x, q_y], q_phi)
@@ -74,7 +74,7 @@ gt_cv_model = CombinedLinearGaussianTransitionModel([
 #
 # Example:
 #   -10 deg/s for 6 seconds => about 60 degree right turn.
-turn_rate = np.radians(-15.0)
+turn_rate = np.radians(-20.0)
 gt_right_turn_model = KnownTurnRate([q_x, q_y], turn_rate)
 
 # Turn interval
@@ -103,10 +103,10 @@ disturbance_factor_process = 100 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
-    'disturb_noise_coeff': [False, True],
+    'disturb_noise_coeff': [True, True],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
-    'parameters': [[[700, disturbance_factor_process], [800, 1/disturbance_factor_process]]]
+    'parameters': [[[700, disturbance_factor_process], [750, 1/disturbance_factor_process], [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
 }
 
 # ------------------------------------------------------------------
@@ -227,10 +227,10 @@ from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
 disturbance_factor_meas = 4 #4
 gt_measurement_configs = {
-    'disturbance_mode': ['jump', 'drift', 'outliers'],
-    'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
-    # 'disturbance_mode': ['jump'],
-    # 'parameters': [[[100, disturbance_factor_meas], [200, 1/disturbance_factor_meas], [300, 1/disturbance_factor_meas], [400, disturbance_factor_meas]]]
+    # 'disturbance_mode': ['jump', 'drift', 'outliers'],
+    # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
+    'disturbance_mode': ['jump'],
+    'parameters': [[[100, disturbance_factor_meas], [200, 1/disturbance_factor_meas], [300, 1/disturbance_factor_meas], [350, disturbance_factor_meas]]]
 }
 meas_std_dev_memory = []
 
@@ -371,6 +371,8 @@ with open("entropy_threshold.json", 'r') as f:
     entropy_thresholds = json.load(f)
 with open("opinion_threshold_smoothed.json", 'r') as f:
     opinion_thresholds = json.load(f)
+with open("adjusted_opinion_threshold_smoothed.json", 'r') as f:
+    adjusted_opinion_thresholds = json.load(f)
 
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
@@ -550,6 +552,7 @@ dc_history = []
 
 h3_ng_op_history = []
 global_op_history = []
+fused_2_op_obj_history = []
 
 
 from ordered_set import OrderedSet
@@ -568,6 +571,14 @@ from collections import deque
 ops_component_x = []
 ops_component_y = []
 
+from griebels_methods.binomial_hypothesis import GriebelBinomialOpinion, GriebelInnovationTest
+griebel_inno = GriebelInnovationTest(
+    dim_meas=measurement_model.ndim_meas,
+    alpha=0.005,
+    window_length=35,
+    two_sided=False,
+    mapping=measurement_model.mapping,
+)
 
 for i, measurement in enumerate(measurements):
     prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
@@ -604,6 +615,19 @@ for i, measurement in enumerate(measurements):
     H = measurement_model.matrix()
     K = P @ H.T @ np.linalg.inv(S)
     K_history.append(K)
+
+    z = measurement.state_vector
+    z_pred = hypothesis.measurement_prediction.mean
+    S = hypothesis.measurement_prediction.covar
+
+    griebel_inno_result = griebel_inno.assess(z, z_pred, S)
+    griebel_inno_score = griebel_inno_result["score"]
+    griebel_inno_belief = griebel_inno_result["opinion"]["belief"]
+    griebel_inno_disbelief = griebel_inno_result["opinion"]["disbelief"]
+    griebel_inno_uncertainty = griebel_inno_result["opinion"]["uncertainty"]
+    griebel_op = sl.Opinion(griebel_inno_belief, griebel_inno_disbelief)
+    griebel_op.prior_belief_masses =  [0.995, 0.005]
+    fused_2_op_obj_history.append(griebel_op)
 
     eta = (measurement.state_vector.reshape(-1, 1) - H @ post.state_vector).flatten()
     eta_history.append(eta)
@@ -779,8 +803,8 @@ for i, measurement in enumerate(measurements):
     # global_opinion_ss = fusion_weighted_belief(w_all)
     # global_opinion = sl.Opinion(global_opinion_ss.belief[0], global_opinion_ss.belief[1])
     # global_opinion = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, h_opinions)
-    global_opinion = h_opinions[0]
-    global_op_history.append(global_opinion)
+    # global_opinion = h_opinions[0]
+    # global_op_history.append(global_opinion)
 
     # belief_history.append(global_opinion.belief())
     # disbelief_history.append(global_opinion.disbelief())
@@ -790,10 +814,6 @@ for i, measurement in enumerate(measurements):
     uncertainty_history.append(kl_opinion.uncertainty())
 
 
-    # dc = r_opinion.degree_of_conflict(q_opinion)
-    # dc_history.append(dc)
-
-    # dc_history.append(dc)
 
 
 # plt.plot(list(range(len(C_history))), C_history)
@@ -835,15 +855,21 @@ op_ref = eval(f"sl.Opinion{W}d")(*([1/W]*W))
 
 entropy_opinions = []
 direct_entropy_opinions = []
+conceivability_cross_entropy = []
 sums_of_evidence = []
 sums_of_evidence_comp = []
 sums_of_evidence_x = []
 sums_of_evidence_y = []
 evidences = []
+buffer_uncertainties =[]
+buffered_ops = []
 
 for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_timestep)):
     ltst.add(op_obs)
     op_buffer = ltst.get_opinion()
+    # if 500 <= idx <=550:
+    #     buffer_u = op_buffer.uncertainty()
+    #     op_buffer = sl.Opinion(*([(1 - buffer_u)/W]*W))
     st_op = ltst.get_short_opinion()
     lt_op = ltst.get_long_opinion()
     conflict = ltst.get_conflicted_pair()
@@ -863,16 +889,47 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     resets[idx] = ltst.is_last_conflicted()
     dc_ref[idx] = op_buffer.degree_of_conflict(op_ref)
     dc_ltst[idx] = st_op.degree_of_conflict(lt_op_prior)
+    buffered_ops.append(op_buffer)
 
     th_dc[idx] = calc_threshold_n_diff(W, sum(op_buffer.as_dirichlet().evidences), 0.1)
     # print("Sum of Evidence:", sum(op_buffer.as_dirichlet().evidences))
     sums_of_evidence.append(int(sum(op_buffer.as_dirichlet().evidences)))
     evidences.append(list(op_buffer.as_dirichlet().evidences))
 
+    buffer_uncertainties.append(op_buffer.uncertainty())
+
     entropy = -1 * np.sum(op_buffer.getProjection() * np.log2(op_buffer.getProjection()))
     entropy /= np.log2(W)
     entropy = 1 - entropy
     entropy_opinions.append(entropy)
+
+    eps = 1e-12
+    con_cross_ent = -1 * np.sum(
+        op_ref.getProjection()
+        * np.log2(op_buffer.belief_masses +eps) # + op_buffer.uncertainty())
+    )
+    Hb_max = -((W - 1) / W) * np.log2(eps)
+    con_cross_ent /= Hb_max
+
+    u_min = W / (W + SHORT_WINDOW_SIZE + calculate_lt_evidence(W, DISCOUNT))
+
+    Hc_max = -((W - 1) / W) * np.log2(u_min)
+
+    con_cross_ent_norm = 1 - con_cross_ent / Hc_max
+
+    R = sum(op_buffer.as_dirichlet().evidences)
+    u_current = W / (W + R)
+    Hc_max_current = -((W - 1) / W) * np.log2(u_current)
+    compatibility = con_cross_ent / Hc_max_current
+
+    conceivability_cross_entropy.append(con_cross_ent)
+    # con_cross_ent = -1 * np.sum(op_ref.getProjection()  * (np.log2(op_buffer.belief_masses + op_buffer.uncertainty())))
+    # u_min = W / (W + SHORT_WINDOW_SIZE + calculate_lt_evidence(W, DISCOUNT))
+    # Hc_max = -((W - 1) / W) * np.log2(u_min)
+    # print(Hc_max)
+    # con_cross_ent /= Hc_max
+    # con_cross_ent = 1 - con_cross_ent
+    # conceivability_cross_entropy.append(con_cross_ent)
 
     evid = op_buffer.as_dirichlet().evidences + 1e-12
     evid_sum = sum(evid)
@@ -908,9 +965,64 @@ for opx, opy in zip(component_x_buffered, component_y_buffered):
 
 dc_comp = [comp.degree_of_conflict(op_ref) for comp in component_buffered]
 
+eps = 1e-12
+a = np.ones(W) / W
+
+dc_adj_l1 = []
+dc_adj_l2 = []
+dc_adj_kl = []
+
+for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
+    u = op.uncertainty()
+    c = 1.0 - u
+
+    if c <= 1e-9:
+        dc_adj_l1.append(np.nan)
+        dc_adj_l2.append(np.nan)
+        dc_adj_kl.append(np.nan)
+        global_op_history.append(sl.Opinion2d(0, 0))
+        # fused_2_op_obj_history.append(sl.Opinion2d(1 - u - dc_ref[i], dc_ref[i]))
+        continue
+
+    b = np.array(op.belief_masses)
+    b_tilde = b / c
+
+    # L1 / adjusted TV
+    # dc_adj_l1.append(c * 0.5 * np.sum(np.abs(b_tilde - a)))
+    tv = 0.5 * np.sum(np.abs(b_tilde - a))
+    tv_max = 1.0 - 1.0 / W
+
+    dc_l1_norm = c * tv / tv_max
+    # dc_l1_norm = np.clip(dc_l1_norm, 0.0, c)
+
+    dc_adj_l1.append(dc_l1_norm)
+
+    op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
+    # L2
+    d2_max = np.sqrt(1.0 - 1.0 / W)
+    dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
+
+    # KL
+    bt = np.clip(b_tilde, eps, 1.0)
+    dc_adj_kl.append(c * np.sum(bt * np.log(bt / a)) / np.log(W))
+
+    # op_l1 = sl.Opinion2d(1 - u - dc_adj_l1[-1], dc_adj_l1[-1])
+    # op_l1.prior_belief_masses = [0.99, 0.01]
+    global_op_history.append(op_l1)
+
+    # op_dc = sl.Opinion2d(1 - u - dc_ref[i], dc_ref[i])
+    # fused_2_op_obj_history.append(op_dc)
+
 # for i, _ in enumerate(dc_st_lt):
 #     assert np.isclose(dc_ltst[i], dc_st_lt[i]), f"{i}, {dc_ltst[i]}, {dc_st_lt[i]}"
 
+# plt.figure()
+# plt.plot(dc_adj_l1, label="dc_adj_l1")
+# plt.plot(dc_adj_l2, label="dc_adj_l2")
+# plt.plot(dc_adj_kl, label="dc_adj_kl")
+# plt.legend()
+# plt.grid()
+# plt.title("DC Adjusted")
 
 plt.figure()
 plt.plot(model_indices, label="Chosen Model")
@@ -932,6 +1044,16 @@ plt.plot([meas_bias_memory[i][1] for i in range(len(meas_bias_memory))], label="
 plt.legend()
 plt.grid()
 plt.title("Disturbances")
+
+plt.figure()
+plt.plot(griebel_inno.score_history, label="Griebel Innovation SA")
+# plt.plot(griebel_bias.score_history, label="Griebel Bias SA")
+# plt.plot(buffer[:, 0], label="Your PIT/LTST Projection")
+plt.axhline(0.95, label="0.95")
+plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="DC Norm Opinion")
+plt.legend()
+plt.grid()
+plt.title("Griebel Baseline vs Own Method")
 
 # plt.figure()
 # plt.plot(list(np.linspace(0, 0.5, 500)), list(map(lambda x: calc_threshold_n_diff(5, 58.62, x), list(np.linspace(0, 0.5, 500)))), label='th')
@@ -1005,19 +1127,39 @@ plt.figure()
 
 # plt.plot(resets, label="Reset")
 plt.plot(dc_ref, label="DC Radial")
+# plt.plot([dc_ref[i]/(1 - buffer_uncertainties[i]) for i in range(len(dc_ref))], label="DC Radial/(1-u)")
+dc_adj = []
+for dc, u in zip(dc_ref, buffer_uncertainties):
+    c = (1.0 - u)**2
+    dc_adj.append(dc / c if c > 1e-6 else np.nan)
+
+# plt.plot(dc_adj, label="Adjusted DC Radial")
+# plt.plot(buffer_uncertainties, label="Buffer Uncertainty")
 # plt.plot(dc_ltst, label="DC LTST")
-plt.plot(entropy_opinions, label="Entropy")
-plt.plot(direct_entropy_opinions, label="Direct Entropy")
+# plt.plot(entropy_opinions, label="Entropy")
+# plt.plot(direct_entropy_opinions, label="Direct Entropy")
+# plt.plot(conceivability_cross_entropy, label="Conceivability Cross Entropy")
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT)+SHORT_WINDOW_SIZE, alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT+ST")
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT")
-plt.plot([entropy_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Entropy Th Dynamic")
-plt.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence], label = "Th Radial")
+# plt.plot([entropy_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Entropy Th Dynamic")
+plt.plot([opinion_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Th Radial")
+plt.plot(dc_adj_l1, label="dc_adj_l1")
+plt.plot([adjusted_opinion_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Th L1 DC")
+# plt.plot(dc_adj_l2, label="dc_adj_l2")
+# plt.plot(dc_adj_kl, label="dc_adj_kl")
 # plt.plot([calc_threshold_n_diff(W, s, 0.1) for s in sums_of_evidence], label = "Griebel Th Dynamic")
 # plt.plot(kl_C_history, label="KL C")
 plt.yticks(np.linspace(0, 1, 11))
 plt.grid()
 plt.legend()
 plt.title("DCs")
+
+plt.figure()
+plt.plot([dc_ref[i] / opinion_thresholds[f"{W}, {s}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Radial")
+plt.plot([dc_adj_l1[i] / adjusted_opinion_thresholds[f"{W}, {s}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="L1 DC")
+plt.legend()
+plt.grid()
+plt.title("Signal")
 
 fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
 # --- Radial ---
@@ -1264,12 +1406,12 @@ for trace in fig.data:
     trace.update(xaxis="x1", yaxis="y1")
 
 b0_f, d0_f, u0_f = global_op_history[0].belief(), global_op_history[0].disbelief(), global_op_history[0].uncertainty()
-# b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
+b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u0_f], #, u0_f2],
-        b=[d0_f], #, d0_f2],
-        c=[b0_f], #, b0_f2],
+        a=[u0_f, u0_f2],
+        b=[d0_f, d0_f2],
+        c=[b0_f, b0_f2],
 
         mode='markers',
         marker=dict(size=[14, 14], color=['purple', 'cyan']),
@@ -1279,7 +1421,7 @@ fig.add_trace(
     row=1, col=4
 )
 
-prior = 0.5  # oder: opinion.prior_belief_masses[0]
+prior = global_op_history[0].prior_belief_masses[0]
 
 P0 = b0_f + prior * u0_f
 
@@ -1434,16 +1576,16 @@ fig.add_trace(
     row=4, col=4
 )
 
-# fig.add_trace(
-#     go.Bar(
-#         x=list(range(M)),
-#         y=h4_count_history[0],
-#         name="H4 counts",
-#         marker=dict(color='cyan')
-#
-#     ),
-#     row=4, col=4
-# )
+fig.add_trace(
+    go.Bar(
+        x=list(range(W)),
+        y=evidences[0],
+        name="Buffer evidence",
+        marker=dict(color='cyan')
+
+    ),
+    row=4, col=5
+)
 #
 # fig.add_trace(
 #     go.Bar(
@@ -1457,8 +1599,8 @@ fig.add_trace(
 # )
 
 # fig.update_yaxes(range=[0, M**2], row=4, col=2)
-fig.update_yaxes(range=[0, SHORT_WINDOW_SIZE], row=4, col=4)
-# fig.update_yaxes(range=[0, M**2], row=4, col=4)
+fig.update_yaxes(range=[0, SHORT_WINDOW_SIZE*2], row=4, col=4)
+fig.update_yaxes(range=[0, SHORT_WINDOW_SIZE*2], row=4, col=5)
 # fig.update_yaxes(range=[0, M**2], row=4, col=5)
 
 n_base = len(fig.data)
@@ -1476,7 +1618,7 @@ for i, frame in enumerate(fig.frames):
     frame.name = str(i)
     b_f, d_f, u_f = global_op_history[i].belief(), global_op_history[i].disbelief(), global_op_history[
         i].uncertainty()
-    # b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
+    b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
     # b_ks, d_ks, u_ks = b0_ks, d0_ks, u0_ks#ks_op_obj_history[i].belief(), ks_op_obj_history[i].disbelief(), ks_op_obj_history[i].uncertainty()
     # b_q, d_q, u_q = q_op_obj_history[i].belief(), q_op_obj_history[i].disbelief(), q_op_obj_history[i].uncertainty()
     # b_q2, d_q2, u_q2 = q2_op_obj_history[i].belief(), q2_op_obj_history[i].disbelief(), q2_op_obj_history[i].uncertainty()
@@ -1486,6 +1628,7 @@ for i, frame in enumerate(fig.frames):
     # y_i = dirichlet_pdfs[i]
     P = b_f + prior * u_f
     counts_i = counts_history[i]
+    evidences_i = evidences[i]
     # counts_h2 = h2_count_history[i]
     # counts_h4 = h4_count_history[i]
     # counts_h5 = h5_count_history[i]
@@ -1515,9 +1658,9 @@ for i, frame in enumerate(fig.frames):
     new_data = list(frame.data)
 
     new_data.append(
-        go.Scatterternary(a=[u_f], #, u_f2],
-                          b=[d_f], #, d_f2],
-                          c=[b_f], #, b_f2],
+        go.Scatterternary(a=[u_f, u_f2],
+                          b=[d_f, d_f2],
+                          c=[b_f, b_f2],
                           cliponaxis=False)
     )
 
@@ -1576,7 +1719,7 @@ for i, frame in enumerate(fig.frames):
 
     # new_data.append(go.Bar(x=list(range(M)), y=counts_h2))
     new_data.append(go.Bar(x=list(range(M)), y=counts_i))
-    # new_data.append(go.Bar(x=list(range(M)), y=counts_h4))
+    new_data.append(go.Bar(x=list(range(M)), y=evidences_i))
     # new_data.append(go.Bar(x=list(range(M)), y=counts_h5))
 
 
