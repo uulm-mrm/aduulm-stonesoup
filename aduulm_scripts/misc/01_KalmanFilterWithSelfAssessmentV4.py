@@ -103,10 +103,10 @@ disturbance_factor_process = 100 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
-    'disturb_noise_coeff': [True, True],
+    'disturb_noise_coeff': [True, False],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
-    'parameters': [[[700, disturbance_factor_process], [750, 1/disturbance_factor_process], [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
+    'parameters': [[[700, disturbance_factor_process], [800, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
 }
 
 # ------------------------------------------------------------------
@@ -484,6 +484,44 @@ def scalar_u_to_opinion(u: float, W: int, scale=1):
     dist = eval(f"sl.DirichletDistribution{W}d").from_evidences(evidence)
     return dist.as_opinion()
 
+def multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.5, eps=1e-12):
+    """
+    Maps a W-dimensional multinomial opinion to a binomial OK opinion.
+
+    H = "component/model is consistent"
+
+    Returns:
+        op_ok: binomial opinion with
+            b = OK belief
+            d = alarm / inconsistency disbelief
+            u = original uncertainty
+    """
+    u = op.uncertainty()
+    c = 1.0 - u
+
+    if c <= eps:
+        op_ok = sl.Opinion2d(0.0, 0.0)
+        op_ok.prior_belief_masses = [prior_ok, 1.0 - prior_ok]
+        return op_ok
+
+    a = np.ones(W) / W
+    b = np.asarray(op.belief_masses, dtype=float)
+
+    # evidential distribution
+    b_tilde = b / c
+
+    # normalized TV distance
+    tv = 0.5 * np.sum(np.abs(b_tilde - a))
+    tv_max = 1.0 - 1.0 / W
+
+    d_alarm = c * tv / tv_max
+    d_alarm = np.clip(d_alarm, 0.0, c)
+
+    b_ok = c - d_alarm
+
+    op_ok = sl.Opinion2d(b_ok, d_alarm)
+    op_ok.prior_belief_masses = [prior_ok, 1.0 - prior_ok]
+    return op_ok
 
 # %%
 from stonesoup.types.hypothesis import SingleHypothesis
@@ -965,6 +1003,7 @@ for opx, opy in zip(component_x_buffered, component_y_buffered):
 
 dc_comp = [comp.degree_of_conflict(op_ref) for comp in component_buffered]
 
+
 eps = 1e-12
 a = np.ones(W) / W
 
@@ -1013,6 +1052,42 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     # op_dc = sl.Opinion2d(1 - u - dc_ref[i], dc_ref[i])
     # fused_2_op_obj_history.append(op_dc)
 
+
+component_x_binomial = []
+component_y_binomial = []
+component_binomial = []
+overall_binomial = []
+
+p_ok_x = []
+p_ok_y = []
+p_ok_comp = []
+p_ok_overall = []
+
+
+prior_ok = 0.5 #float(np.sqrt(0.5))
+
+for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
+    opx, opy = ops
+    opx_bin= multinomial_opinion_to_binomial_ok_opinion(opx, W, prior_ok=prior_ok)
+    opy_bin = multinomial_opinion_to_binomial_ok_opinion(opy, W, prior_ok=prior_ok)
+
+    component_x_binomial.append(opx_bin)
+    component_y_binomial.append(opy_bin)
+    component_op = opx_bin.multiply(opy_bin)
+    # component_op.prior_belief_masses = [0.5, 0.5]
+    # component_binomial.append(sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [opx_bin, opy_bin]))
+    component_binomial.append(component_op)
+    print(i, "Compon:", component_op)
+    print(i, "Radial:", global_op_history[i])
+    overall_op = sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [component_op, global_op_history[i]])
+    overall_binomial.append(overall_op)
+    print(i, "Overall:", overall_op)
+
+    p_ok_x.append(opx_bin.getProjection()[0]) #opx_bin.belief() + prior_ok * opx_bin.uncertainty())
+    p_ok_y.append(opy_bin.getProjection()[0]) #opy_bin.belief() + prior_ok * opy_bin.uncertainty())
+    p_ok_comp.append(component_binomial[-1].getProjection()[0])
+    p_ok_overall.append(overall_op.getProjection()[0])
+
 # for i, _ in enumerate(dc_st_lt):
 #     assert np.isclose(dc_ltst[i], dc_st_lt[i]), f"{i}, {dc_ltst[i]}, {dc_st_lt[i]}"
 
@@ -1050,7 +1125,11 @@ plt.plot(griebel_inno.score_history, label="Griebel Innovation SA")
 # plt.plot(griebel_bias.score_history, label="Griebel Bias SA")
 # plt.plot(buffer[:, 0], label="Your PIT/LTST Projection")
 plt.axhline(0.95, label="0.95")
-plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="DC Norm Opinion")
+plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
+plt.plot(p_ok_x, label="P_OK Comp X")
+plt.plot(p_ok_y, label="P_OK Comp Y")
+plt.plot(p_ok_comp, label="P_OK Comp Fused")
+plt.plot(p_ok_overall, label="P_OK Overall")
 plt.legend()
 plt.grid()
 plt.title("Griebel Baseline vs Own Method")
@@ -1387,25 +1466,25 @@ fig.set_subplots(
     specs=[
         [{"colspan": 3, "rowspan": 3},  None,                   None,                   {"colspan": 2, "rowspan": 2, "type": "ternary"}, None],              # Zeile 1
         [None,                          None,                   None,                   None,                   None                ],        # Zeile 2
-        [None,                          None,                   None,                   {"type": "ternary"},    None                ],        # Zeile 3
+        [None,                          None,                   None,                   {"type": "ternary"},    {"type": "ternary"} ],        # Zeile 3
         [None,                          None,                   None,                   {"type": "xy"},         {"type": "xy"}      ]
     ],
     subplot_titles=[
-        "Track", "Global Opinion",
+        "Track", "Overall Opinion vs Griebel",
         # "H1 Opinion", "H2 Opinion",
-        "H3 Opinion",
-        # "H4 Opinion", "H5 Opinion",
+        "Radial and Comps",
+        "X and Y Comp",# "H5 Opinion",
         # "H2 Histogram",
-        "H3 Histogram", #"H4 Histogram", "H5 Histogram"
+        "Short Term Bins", "Radial Buffer Bins"#, "H5 Histogram"
     ],
-    vertical_spacing=0.08 ,
+    vertical_spacing=0.1 ,
     horizontal_spacing=0.01
 )
 
 for trace in fig.data:
     trace.update(xaxis="x1", yaxis="y1")
 
-b0_f, d0_f, u0_f = global_op_history[0].belief(), global_op_history[0].disbelief(), global_op_history[0].uncertainty()
+b0_f, d0_f, u0_f = overall_binomial[0].belief(), overall_binomial[0].disbelief(), overall_binomial[0].uncertainty()
 b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
@@ -1421,7 +1500,7 @@ fig.add_trace(
     row=1, col=4
 )
 
-prior = global_op_history[0].prior_belief_masses[0]
+prior = overall_binomial[0].prior_belief_masses[0]
 
 P0 = b0_f + prior * u0_f
 
@@ -1484,21 +1563,21 @@ fig.add_trace(
 #     row=3, col=2
 # )
 
-b0, d0, u0 = opinions[0]
+b0, d0, u0 = global_op_history[0].belief(), global_op_history[0].disbelief(), global_op_history[0].uncertainty()
 # b0_ks, d0_ks, u0_ks = ks_op_obj_history[0].belief(), ks_op_obj_history[0].disbelief(), ks_op_obj_history[0].uncertainty()
 # b0_ad, d0_ad, u0_ad = opinions_ad[0]
-b_h3, d_h3, u_h3 = h3_ng_op_history[0].belief(), h3_ng_op_history[0].disbelief(), h3_ng_op_history[0].uncertainty()
+b_h3, d_h3, u_h3 = component_binomial[0].belief(), component_binomial[0].disbelief(), component_binomial[0].uncertainty()
 fig.add_trace(
     go.Scatterternary(
-        a=[u_h3, u0,] if show_all_opinion else [u_h3],
-        b=[d_h3, d0,] if show_all_opinion else [d_h3],
-        c=[b_h3, b0,] if show_all_opinion else [b_h3],
+        a=[u_h3, u0,], # if show_all_opinion else [u_h3],
+        b=[d_h3, d0,], # if show_all_opinion else [d_h3],
+        c=[b_h3, b0,], # if show_all_opinion else [b_h3],
         mode='markers',
-        marker=dict(size=14, color=['green', 'cyan', 'yellow'] if show_all_opinion else ['green']),
+        marker=dict(size=14, color=['green', 'cyan', 'yellow'] if show_all_opinion else ['green', 'cyan']),
         hovertemplate=["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
                        "KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
-                       "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]  if show_all_opinion else ["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="H3"
+                       "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]  if show_all_opinion else ["Components<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Radial<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="Innovation"
     ),
     row=3, col=4
 )
@@ -1517,23 +1596,23 @@ fig.add_trace(
 
 
 
-# b_h4, d_h4, u_h4 = h4_bias_op_history[0].belief(), h4_bias_op_history[0].disbelief(), h4_bias_op_history[0].uncertainty()
-# b_h41, d_h41, u_h41 = h4_1_op_history[0].belief(), h4_1_op_history[0].disbelief(), h4_1_op_history[0].uncertainty()
+b_h4, d_h4, u_h4 = component_x_binomial[0].belief(), component_x_binomial[0].disbelief(), component_x_binomial[0].uncertainty()
+b_h41, d_h41, u_h41 = component_y_binomial[0].belief(), component_y_binomial[0].disbelief(), component_y_binomial[0].uncertainty()
 # b_h42, d_h42, u_h42 = h4_2_op_history[0].belief(), h4_2_op_history[0].disbelief(), h4_2_op_history[0].uncertainty()
-# fig.add_trace(
-#     go.Scatterternary(
-#         a=[u_h4, u_h41, u_h42] if show_all_opinion else [u_h4],
-#         b=[d_h4, d_h41, d_h42] if show_all_opinion else [d_h4],
-#         c=[b_h4, b_h41, b_h42] if show_all_opinion else [b_h4],
-#         mode='markers',
-#         marker=dict(size=14, color=['green', 'yellow', 'cyan'] if show_all_opinion else ['green']),
-#         hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
-#                        "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
-#                        "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-#         name="H4"
-#     ),
-#     row=3, col=4
-# )
+fig.add_trace(
+    go.Scatterternary(
+        a=[u_h4, u_h41], #, u_h42] if show_all_opinion else [u_h4],
+        b=[d_h4, d_h41], #, d_h42] if show_all_opinion else [d_h4],
+        c=[b_h4, b_h41], #, b_h42] if show_all_opinion else [b_h4],
+        mode='markers',
+        marker=dict(size=14, color=['green', 'yellow', 'cyan'] if show_all_opinion else ['red', 'blue']),
+        hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
+                       "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["X<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Y<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="H4"
+    ),
+    row=3, col=5
+)
 
 
 # b_h5, d_h5, u_h5 = h5_white_op_history[0].belief(), h5_white_op_history[0].disbelief(), h5_white_op_history[0].uncertainty()
@@ -1616,14 +1695,14 @@ new_frames = []
 
 for i, frame in enumerate(fig.frames):
     frame.name = str(i)
-    b_f, d_f, u_f = global_op_history[i].belief(), global_op_history[i].disbelief(), global_op_history[
+    b_f, d_f, u_f = overall_binomial[i].belief(), overall_binomial[i].disbelief(), overall_binomial[
         i].uncertainty()
     b_f2, d_f2, u_f2 = fused_2_op_obj_history[i].belief(), fused_2_op_obj_history[i].disbelief(), fused_2_op_obj_history[i].uncertainty()
     # b_ks, d_ks, u_ks = b0_ks, d0_ks, u0_ks#ks_op_obj_history[i].belief(), ks_op_obj_history[i].disbelief(), ks_op_obj_history[i].uncertainty()
     # b_q, d_q, u_q = q_op_obj_history[i].belief(), q_op_obj_history[i].disbelief(), q_op_obj_history[i].uncertainty()
     # b_q2, d_q2, u_q2 = q2_op_obj_history[i].belief(), q2_op_obj_history[i].disbelief(), q2_op_obj_history[i].uncertainty()
     # b_r, d_r, u_r = r_op_obj_history[i].belief(), r_op_obj_history[i].disbelief(), r_op_obj_history[i].uncertainty()
-    b, d, u = opinions[i]
+    b, d, u = global_op_history[i].belief(), global_op_history[i].disbelief(), global_op_history[i].uncertainty()
     # b_ad, d_ad, u_ad = opinions_ad[i]
     # y_i = dirichlet_pdfs[i]
     P = b_f + prior * u_f
@@ -1640,9 +1719,9 @@ for i, frame in enumerate(fig.frames):
     # b_h2, d_h2, u_h2 = h2_q_op_history[i].belief(), h2_q_op_history[i].disbelief(), h2_q_op_history[i].uncertainty()
     # b_h21, d_h21, u_h21 = h2_1_op_history[i].belief(), h2_1_op_history[i].disbelief(), h2_1_op_history[i].uncertainty()
     # b_h22, d_h22, u_h22 = h2_2_op_history[i].belief(), h2_2_op_history[i].disbelief(), h2_2_op_history[i].uncertainty()
-    b_h3, d_h3, u_h3 = h3_ng_op_history[i].belief(), h3_ng_op_history[i].disbelief(), h3_ng_op_history[i].uncertainty()
-    # b_h4, d_h4, u_h4 = h4_bias_op_history[i].belief(), h4_bias_op_history[i].disbelief(), h4_bias_op_history[i].uncertainty()
-    # b_h41, d_h41, u_h41 = h4_1_op_history[i].belief(),  h4_1_op_history[i].disbelief(), h4_1_op_history[i].uncertainty()
+    b_h3, d_h3, u_h3 = component_binomial[i].belief(), component_binomial[i].disbelief(), component_binomial[i].uncertainty()
+    b_h4, d_h4, u_h4 = component_x_binomial[i].belief(), component_x_binomial[i].disbelief(), component_x_binomial[i].uncertainty()
+    b_h41, d_h41, u_h41 = component_y_binomial[i].belief(),  component_y_binomial[i].disbelief(), component_y_binomial[i].uncertainty()
     # b_h42, d_h42, u_h42 = h4_2_op_history[i].belief(), h4_2_op_history[i].disbelief(), h4_2_op_history[i].uncertainty()
     # b_h5, d_h5, u_h5 = h5_white_op_history[i].belief(), h5_white_op_history[i].disbelief(), h5_white_op_history[
     #     i].uncertainty()
@@ -1683,9 +1762,9 @@ for i, frame in enumerate(fig.frames):
     #                       cliponaxis=False)
     # )
     new_data.append(
-        go.Scatterternary(a=[u_h3, u] if show_all_opinion else [u_h3],
-                          b=[d_h3, d] if show_all_opinion else [d_h3],
-                          c=[b_h3, b] if show_all_opinion else [b_h3],
+        go.Scatterternary(a=[u_h3, u],# if show_all_opinion else [u_h3],
+                          b=[d_h3, d],# if show_all_opinion else [d_h3],
+                          c=[b_h3, b],# if show_all_opinion else [b_h3],
                           cliponaxis=False)
     )
 
@@ -1700,12 +1779,12 @@ for i, frame in enumerate(fig.frames):
     #                       cliponaxis=False,
     #                       )
     # )
-    # new_data.append(
-    #     go.Scatterternary(a=[u_h4, u_h41, u_h42] if show_all_opinion else [u_h4],
-    #                       b=[d_h4, d_h41, d_h42] if show_all_opinion else [d_h4],
-    #                       c=[b_h4, b_h41, b_h42] if show_all_opinion else [b_h4],
-    #                       cliponaxis=False)
-    # )
+    new_data.append(
+        go.Scatterternary(a=[u_h4, u_h41], #, u_h42] if show_all_opinion else [u_h4],
+                          b=[d_h4, d_h41], #, d_h42] if show_all_opinion else [d_h4],
+                          c=[b_h4, b_h41], #, b_h42] if show_all_opinion else [b_h4],
+                          cliponaxis=False)
+    )
     # new_data.append(
     #     go.Scatterternary(a=[u_h5, u_h51, u_h52] if show_all_opinion else [u_h5],
     #                       b=[d_h5, d_h51, d_h52] if show_all_opinion else [d_h5],
@@ -1808,8 +1887,10 @@ fig.update_layout(
 
 )
 for ann in fig.layout.annotations:
-    if "Opinion" in ann.text:
+    if "Comp" in ann.text:
         ann.update(x=ann.x - 0.1, y=ann.y - 0.05, xanchor='left', align='left')
+    elif "Overall" in ann.text:
+        ann.update(x=ann.x - 0.15, y=ann.y - 0.05, xanchor='left', align='left')
 
 plotter.fig.show(renderer="browser")
 plotter.show()
