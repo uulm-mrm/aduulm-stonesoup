@@ -33,8 +33,8 @@ start_time = datetime.now()
 np.random.seed(20) #2
 
 # %%
-use_ct_model = True
-
+use_ct_model = False
+activate_disturbances = True
 q_x   = 0.25   # Geschwindigkeitsrauschen (σ_vvel)
 q_y   = 0.25
 if use_ct_model:
@@ -99,7 +99,7 @@ process_noise_coeff_memory = [[], []]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 100 #16
+disturbance_factor_process = 100 if activate_disturbances else 1 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
@@ -225,7 +225,7 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 4 #4
+disturbance_factor_meas = 4 if activate_disturbances else 1 #4
 gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
@@ -252,7 +252,7 @@ meas_bias_memory = []
 x_bias = -5
 y_bias = -5
 for i, measurement in enumerate(measurements):
-    if 600 <= i <= 650:
+    if 600 <= i <= 650 and activate_disturbances:
         measurement.state_vector += np.array([[x_bias], [y_bias]])
         meas_bias_memory.append((x_bias, y_bias))
     else:
@@ -320,7 +320,7 @@ selfassessor_measures_history = []
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
 nis_settings = {
-    "window_length": 35,  # window size of the NIS averaging
+    "window_length": 1,  # window size of the NIS averaging
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
@@ -377,7 +377,7 @@ with open("adjusted_opinion_threshold_smoothed.json", 'r') as f:
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
-THRESHOLD = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, DISCOUNT)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
+THRESHOLD = griebel_threshold # opinion_thresholds[f"{W}, {calculate_lt_evidence(W, 0.99)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
 print("Threshold for LTST:", THRESHOLD)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
@@ -399,6 +399,9 @@ component_y_buffered = []
 
 ops = []
 ops_per_timestep = []
+
+# Without LTST Buffer
+radial_window = []
 
 import scipy.linalg
 from datetime import timedelta
@@ -791,6 +794,7 @@ for i, measurement in enumerate(measurements):
 
     one_time_dist = eval(f"sl.DirichletDistribution{W}d").from_evidences(evidence)
     one_time_op = one_time_dist.as_opinion()
+    radial_window.append(one_time_op)
     ops_per_timestep.append(one_time_op)
 
     counts_history.append(list(counts))
@@ -890,7 +894,10 @@ dc_ltst = np.zeros(len(ops))
 th_dc = np.zeros(len(ops))
 
 op_ref = eval(f"sl.Opinion{W}d")(*([1/W]*W))
+radial_window_op = eval(f"sl.Opinion{W}d")(list(np.zeros(W)))
 
+radial_window_dc_history = []
+p_ok_exp = []
 entropy_opinions = []
 direct_entropy_opinions = []
 conceivability_cross_entropy = []
@@ -949,7 +956,7 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     Hb_max = -((W - 1) / W) * np.log2(eps)
     con_cross_ent /= Hb_max
 
-    u_min = W / (W + SHORT_WINDOW_SIZE + calculate_lt_evidence(W, DISCOUNT))
+    u_min = W / (W + SHORT_WINDOW_SIZE + calculate_lt_evidence(W, 0.99))
 
     Hc_max = -((W - 1) / W) * np.log2(u_min)
 
@@ -977,6 +984,32 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     direct_entropy = 1 - direct_entropy
     direct_entropy_opinions.append(direct_entropy)
 
+    # without any buffer
+    radial_window_op = sl.Fusion.fuse_opinions(sl.FusionType.CUMULATIVE, [radial_window_op, radial_window[idx]])
+    radial_window_op = radial_window_op.trust_discount(0.9976)
+    radial_window_dc = radial_window_op.degree_of_conflict(op_ref)
+
+    u = radial_window_op.uncertainty()
+    c = 1.0 - u
+    a = np.ones(W) / W
+
+    if c <= 1e-9:
+        radial_window_dc_history.append(np.nan)
+        continue
+
+    b = np.array(radial_window_op.belief_masses)
+    b_tilde = b / c
+
+    # L1 / adjusted TV
+    tv = 0.5 * np.sum(np.abs(b_tilde - a))
+    tv_max = 1.0 - 1.0 / W
+
+    radial_window_op_norm = c * tv / tv_max
+    radial_window_dc_history.append(radial_window_op_norm)
+    op_exp_bin = multinomial_opinion_to_binomial_ok_opinion(radial_window_op, W)
+    p_ok_exp.append(op_exp_bin.getProjection()[0])
+    # print(radial_window_op)
+    # print(sum(radial_window_op.as_dirichlet().evidences))
 for opx, opy in zip(
     ops_component_x, ops_component_y,
 ):
@@ -1077,11 +1110,11 @@ for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     # component_op.prior_belief_masses = [0.5, 0.5]
     # component_binomial.append(sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [opx_bin, opy_bin]))
     component_binomial.append(component_op)
-    print(i, "Compon:", component_op)
-    print(i, "Radial:", global_op_history[i])
-    overall_op = sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [component_op, global_op_history[i]])
+    # print(i, "Compon:", component_op)
+    # print(i, "Radial:", global_op_history[i])
+    overall_op = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, [component_op, global_op_history[i]])
     overall_binomial.append(overall_op)
-    print(i, "Overall:", overall_op)
+    # print(i, "Overall:", overall_op)
 
     p_ok_x.append(opx_bin.getProjection()[0]) #opx_bin.belief() + prior_ok * opx_bin.uncertainty())
     p_ok_y.append(opy_bin.getProjection()[0]) #opy_bin.belief() + prior_ok * opy_bin.uncertainty())
@@ -1124,12 +1157,13 @@ plt.figure()
 plt.plot(griebel_inno.score_history, label="Griebel Innovation SA")
 # plt.plot(griebel_bias.score_history, label="Griebel Bias SA")
 # plt.plot(buffer[:, 0], label="Your PIT/LTST Projection")
-plt.axhline(0.95, label="0.95")
-plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
-plt.plot(p_ok_x, label="P_OK Comp X")
-plt.plot(p_ok_y, label="P_OK Comp Y")
-plt.plot(p_ok_comp, label="P_OK Comp Fused")
+# plt.axhline(0.95, label="0.95")
+# plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
+# plt.plot(p_ok_x, label="P_OK Comp X")
+# plt.plot(p_ok_y, label="P_OK Comp Y")
+# plt.plot(p_ok_comp, label="P_OK Comp Fused")
 plt.plot(p_ok_overall, label="P_OK Overall")
+# plt.plot(p_ok_exp, label="P_OK Exp")
 plt.legend()
 plt.grid()
 plt.title("Griebel Baseline vs Own Method")
@@ -1205,7 +1239,7 @@ plt.title("LTST Uncertainties")
 plt.figure()
 
 # plt.plot(resets, label="Reset")
-plt.plot(dc_ref, label="DC Radial")
+# plt.plot(dc_ref, label="DC Radial")
 # plt.plot([dc_ref[i]/(1 - buffer_uncertainties[i]) for i in range(len(dc_ref))], label="DC Radial/(1-u)")
 dc_adj = []
 for dc, u in zip(dc_ref, buffer_uncertainties):
@@ -1221,9 +1255,12 @@ for dc, u in zip(dc_ref, buffer_uncertainties):
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT)+SHORT_WINDOW_SIZE, alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT+ST")
 # plt.plot([calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), alpha=0.01)]*len(entropy_opinions), label = "Entropy Th LT")
 # plt.plot([entropy_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Entropy Th Dynamic")
-plt.plot([opinion_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Th Radial")
-plt.plot(dc_adj_l1, label="dc_adj_l1")
-plt.plot([adjusted_opinion_thresholds[f"{W}, {s}, 0.01"] for s in sums_of_evidence], label = "Th L1 DC")
+# plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.01"] for s in sums_of_evidence], label = "Th Radial")
+plt.plot(dc_adj_l1, label=r"$DC_{\mathrm{norm}}$")
+plt.plot(np.array(selfassessor_measures_history)[:, 0], label="Griebel SA measure")
+plt.plot(np.array(selfassessor_measures_history)[:, 2], label="Griebel SA Threshold")
+# plt.plot([adjusted_opinion_thresholds[f"{W}, {min(s, 150)}, 0.01"] for s in sums_of_evidence], label = "Th L1 DC")
+# plt.plot([radial_window_dc_history[i] for i in range(len(radial_window_dc_history))], label="dc exp Opinion")
 # plt.plot(dc_adj_l2, label="dc_adj_l2")
 # plt.plot(dc_adj_kl, label="dc_adj_kl")
 # plt.plot([calc_threshold_n_diff(W, s, 0.1) for s in sums_of_evidence], label = "Griebel Th Dynamic")
@@ -1234,8 +1271,8 @@ plt.legend()
 plt.title("DCs")
 
 plt.figure()
-plt.plot([dc_ref[i] / opinion_thresholds[f"{W}, {s}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Radial")
-plt.plot([dc_adj_l1[i] / adjusted_opinion_thresholds[f"{W}, {s}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="L1 DC")
+plt.plot([dc_ref[i] / opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Radial")
+plt.plot([dc_adj_l1[i] / adjusted_opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="L1 DC")
 plt.legend()
 plt.grid()
 plt.title("Signal")
@@ -1243,7 +1280,7 @@ plt.title("Signal")
 fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
 # --- Radial ---
 ax1.plot(dc_ref, label="DC Radial")
-ax1.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence],
+ax1.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence],
          label="Th Radial")
 ax1.set_title("Radial")
 ax1.grid()
@@ -1277,8 +1314,8 @@ plt.figure()
 # plt.plot(dc_white_y, label="DC White Y")
 plt.plot(dc_comp_x, label="DC Comp X")
 plt.plot(dc_comp_y, label="DC Comp Y")
-plt.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence_x], label = "Th x", color="blue", alpha=0.5)
-plt.plot([opinion_thresholds[f"{W}, {s}, 0.005"] for s in sums_of_evidence_y], label = "Th y", color="orange", alpha=0.5)
+plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_x], label = "Th x", color="blue", alpha=0.5)
+plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_y], label = "Th y", color="orange", alpha=0.5)
 plt.legend()
 plt.grid()
 plt.title("DC Local")
