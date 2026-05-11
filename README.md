@@ -3,7 +3,9 @@
 This repository contains the implementation of self-assessment extensions for the Stone Soup framework. 
 These extensions are part of our ongoing research on performance monitoring in tracking systems.
 
-For more technical details, please refer to our upcoming publication.
+For more technical details, please refer to our publication [Self-Assessment and Monitoring Module for Tracking Algorithms in the Stone Soup Framework](https://doi.org/10.1109/MFI67357.2025.11259162) with the corresponding [slides](https://www.events-project.eu/wp-content/uploads/2026/02/2025_mfi_self-assessment-module_griebel_wodtko_eu_export.pdf). 
+
+This publication has won the **Second Place Best Paper Award** at 2025 IEEE International Conference on Multisensor Fusion and Integration for Intelligent Systems (MFI).
 
 ## 🔍 Overview
 
@@ -13,15 +15,18 @@ The module enables tracking algorithms to monitor and evaluate their own perform
 <img src="aduulm_scripts/images/concept-selfassessor-stonesoup.png" width="600">
 
 ## 📄 Citation
-If you find this repository useful in your research, please consider citing our work.   
-*[The citation details will be updated once the paper is published.]* 
+If you find this repository useful in your research, please consider citing our work.
 
 ```
-@misc{aduulmstonesoup2025,
-    title={Self-Assessment and Monitoring Module for Tracking Algorithms: Implementation in the Stone Soup Framework},
-    author={Griebel, Thomas and Buchholz, Michael and Dietmayer, Klaus},
-    howpublished = {\url{https://github.com/uulm-mrm/aduulm-stonesoup}},
-    year={2025}
+@INPROCEEDINGS{griebel2025aduulmstonesoup,
+  author={Griebel, Thomas and Wodtko, Thomas and Buchholz, Michael and Dietmayer, Klaus},
+  booktitle={2025 IEEE International Conference on Multisensor Fusion and Integration for Intelligent Systems (MFI)}, 
+  title={Self-Assessment and Monitoring Module for Tracking Algorithms in the Stone Soup Framework}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={1-8},
+  doi={10.1109/MFI67357.2025.11259162}
 }
 ```
 
