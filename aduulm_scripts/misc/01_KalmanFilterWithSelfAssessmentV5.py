@@ -249,8 +249,8 @@ for truth in truths:
 
 # %%
 meas_bias_memory = []
-x_bias = -5
-y_bias = -5
+x_bias = -10
+y_bias = -10
 for i, measurement in enumerate(measurements):
     if 600 <= i <= 650 and activate_disturbances:
         measurement.state_vector += np.array([[x_bias], [y_bias]])
@@ -320,7 +320,7 @@ selfassessor_measures_history = []
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
 nis_settings = {
-    "window_length": 1,  # window size of the NIS averaging
+    "window_length": 35,  # window size of the NIS averaging
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
@@ -377,7 +377,7 @@ with open("adjusted_opinion_threshold_smoothed.json", 'r') as f:
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
-THRESHOLD = griebel_threshold # opinion_thresholds[f"{W}, {calculate_lt_evidence(W, 0.99)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
+THRESHOLD = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, 0.99)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
 print("Threshold for LTST:", THRESHOLD)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
@@ -615,11 +615,13 @@ ops_component_y = []
 from griebels_methods.binomial_hypothesis import GriebelBinomialOpinion, GriebelInnovationTest
 griebel_inno = GriebelInnovationTest(
     dim_meas=measurement_model.ndim_meas,
-    alpha=0.005,
+    alpha=0.05,
     window_length=35,
     two_sided=False,
     mapping=measurement_model.mapping,
 )
+griebel_inno_window = []
+griebel_p_ok_history = []
 
 for i, measurement in enumerate(measurements):
     prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
@@ -663,12 +665,23 @@ for i, measurement in enumerate(measurements):
 
     griebel_inno_result = griebel_inno.assess(z, z_pred, S)
     griebel_inno_score = griebel_inno_result["score"]
+    griebel_inno_accept = griebel_inno_result["accept_h0"]
     griebel_inno_belief = griebel_inno_result["opinion"]["belief"]
     griebel_inno_disbelief = griebel_inno_result["opinion"]["disbelief"]
     griebel_inno_uncertainty = griebel_inno_result["opinion"]["uncertainty"]
-    griebel_op = sl.Opinion(griebel_inno_belief, griebel_inno_disbelief)
-    griebel_op.prior_belief_masses =  [0.995, 0.005]
-    fused_2_op_obj_history.append(griebel_op)
+    griebel_evidence = np.array([int(griebel_inno_accept), 1-int(griebel_inno_accept)])
+    griebel_dist = eval(f"sl.DirichletDistribution{2}d").from_evidences(griebel_evidence)
+    griebel_op = griebel_dist.as_opinion()
+    # griebel_op = sl.Opinion(griebel_inno_belief, griebel_inno_disbelief)
+    # griebel_op.prior_belief_masses =  [0.95, 0.05]
+    griebel_inno_window.append(griebel_op)
+    if len(griebel_inno_window) > griebel_inno.window_length:
+        griebel_inno_window.pop(0)
+    griebel_results_opinion = sl.Fusion.fuse_opinions(sl.FusionType.CUMULATIVE, griebel_inno_window)
+    print(griebel_results_opinion)
+    griebel_p_ok_history.append(griebel_results_opinion.getProjection()[0])
+
+    fused_2_op_obj_history.append(griebel_results_opinion)
 
     eta = (measurement.state_vector.reshape(-1, 1) - H @ post.state_vector).flatten()
     eta_history.append(eta)
@@ -1070,6 +1083,7 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     dc_adj_l1.append(dc_l1_norm)
 
     op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
+    # op_l1.prior_belief_masses = [0.95, 0.05]
     # L2
     d2_max = np.sqrt(1.0 - 1.0 / W)
     dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
@@ -1097,7 +1111,7 @@ p_ok_comp = []
 p_ok_overall = []
 
 
-prior_ok = 0.5 #float(np.sqrt(0.5))
+prior_ok = float(np.sqrt(0.5))
 
 for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     opx, opy = ops
@@ -1154,15 +1168,17 @@ plt.grid()
 plt.title("Disturbances")
 
 plt.figure()
-plt.plot(griebel_inno.score_history, label="Griebel Innovation SA")
+plt.plot(griebel_p_ok_history, label="Griebel Innovation SA")
 # plt.plot(griebel_bias.score_history, label="Griebel Bias SA")
 # plt.plot(buffer[:, 0], label="Your PIT/LTST Projection")
-# plt.axhline(0.95, label="0.95")
-# plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
+plt.axhline(0.95, label="0.95")
+plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
 # plt.plot(p_ok_x, label="P_OK Comp X")
 # plt.plot(p_ok_y, label="P_OK Comp Y")
 # plt.plot(p_ok_comp, label="P_OK Comp Fused")
 plt.plot(p_ok_overall, label="P_OK Overall")
+plt.plot([overall_binomial[i].uncertainty() for i in range(len(overall_binomial))], label="P_OK Uncertainty")
+plt.plot([fused_2_op_obj_history[i].uncertainty() for i in range(len(fused_2_op_obj_history))], label="Griebel Uncertainty")
 # plt.plot(p_ok_exp, label="P_OK Exp")
 plt.legend()
 plt.grid()
@@ -1239,7 +1255,7 @@ plt.title("LTST Uncertainties")
 plt.figure()
 
 # plt.plot(resets, label="Reset")
-# plt.plot(dc_ref, label="DC Radial")
+plt.plot(dc_ref, label=r"$DC_J$")
 # plt.plot([dc_ref[i]/(1 - buffer_uncertainties[i]) for i in range(len(dc_ref))], label="DC Radial/(1-u)")
 dc_adj = []
 for dc, u in zip(dc_ref, buffer_uncertainties):
@@ -1324,6 +1340,90 @@ plt.title("DC Local")
 # plt.plot([chisquare_uniform_test(e, 0.01)['reject_H0'] for e in evidences], label="Reject H0")
 # plt.legend()
 # plt.title("Chi-Square")
+
+import numpy as np
+
+def pp_bounds_single(u, a):
+    p_min = a * u
+    p_max = 1.0 - (1.0 - a) * u
+    return p_min, p_max
+
+
+def pp_bounds_component(u_x, u_y, a_x=np.sqrt(0.5), a_y=np.sqrt(0.5)):
+    px_min, px_max = pp_bounds_single(u_x, a_x)
+    py_min, py_max = pp_bounds_single(u_y, a_y)
+
+    p_comp_min = px_min * py_min
+    p_comp_max = px_max * py_max
+
+    return p_comp_min, p_comp_max
+
+
+def pp_bounds_overall_average(u_x, u_y, u_r,
+                              a_x=np.sqrt(0.5),
+                              a_y=np.sqrt(0.5),
+                              a_r=0.5):
+    p_comp_min, p_comp_max = pp_bounds_component(u_x, u_y, a_x, a_y)
+    p_r_min, p_r_max = pp_bounds_single(u_r, a_r)
+
+    p_overall_min = 0.5 * (p_comp_min + p_r_min)
+    p_overall_max = 0.5 * (p_comp_max + p_r_max)
+
+    return p_overall_min, p_overall_max
+
+
+def pp_bounds_overall_abf(u_x, u_y, u_comp, u_r,
+                          a_x=np.sqrt(0.5),
+                          a_y=np.sqrt(0.5),
+                          a_r=0.5,
+                          eps=1e-12):
+    p_comp_min, p_comp_max = pp_bounds_component(u_x, u_y, a_x, a_y)
+    p_r_min, p_r_max = pp_bounds_single(u_r, a_r)
+
+    denom = u_comp + u_r
+
+    if denom <= eps:
+        # both dogmatic: ABF degenerates; projection lies between channel limits
+        return min(p_comp_min, p_r_min), max(p_comp_max, p_r_max)
+
+    p_overall_min = (u_r * p_comp_min + u_comp * p_r_min) / denom
+    p_overall_max = (u_r * p_comp_max + u_comp * p_r_max) / denom
+
+    return p_overall_min, p_overall_max
+
+p_min_avg = []
+p_max_avg = []
+
+p_min_abf = []
+p_max_abf = []
+
+for opx, opy, op_comp, op_r in zip(
+    component_x_binomial,
+    component_y_binomial,
+    component_binomial,
+    global_op_history
+):
+    u_x = opx.uncertainty()
+    u_y = opy.uncertainty()
+    u_comp = op_comp.uncertainty()
+    u_r = op_r.uncertainty()
+
+    lo_avg, hi_avg = pp_bounds_overall_average(u_x, u_y, u_r)
+    lo_abf, hi_abf = pp_bounds_overall_abf(u_x, u_y, u_comp, u_r)
+
+    p_min_avg.append(lo_avg)
+    p_max_avg.append(hi_avg)
+
+    p_min_abf.append(lo_abf)
+    p_max_abf.append(hi_abf)
+
+plt.figure()
+plt.plot(p_ok_overall, label="P_OK Overall")
+plt.plot(p_min_avg, "--", label="min PP avg")
+plt.plot(p_max_avg, "--", label="max PP avg")
+plt.grid()
+plt.legend()
+plt.title("Analytical PP bounds")
 # %%
 """
 ==============
@@ -1547,7 +1647,7 @@ fig.add_trace(
         b=[1 - P0],
         c=[P0],
         mode='markers',
-        marker=dict(size=10, color='green'),
+        marker=dict(size=10, color='purple'),
         name='Projected Probability',
         hovertemplate="P: %{c:.2f}<extra></extra>"
     ),
@@ -1560,7 +1660,35 @@ fig.add_trace(
                 b=[d0_f, 1 - P0],
                 c=[b0_f, P0],
                 mode='lines',
-                line=dict(color='green', dash='dot'),
+                line=dict(color='purple', dash='dot'),
+                showlegend=False
+            ),
+    row=1, col=4
+)
+
+prior_2 = fused_2_op_obj_history[0].prior_belief_masses[0]
+P0_2 = b0_f2 + prior_2 * u0_f2
+
+fig.add_trace(
+    go.Scatterternary(
+        a=[0],
+        b=[1 - P0_2],
+        c=[P0_2],
+        mode='markers',
+        marker=dict(size=10, color='cyan'),
+        name='Projected Probability',
+        hovertemplate="P: %{c:.2f}<extra></extra>"
+    ),
+    row=1, col=4
+)
+
+fig.add_trace(
+    go.Scatterternary(
+                a=[u0_f2, 0],
+                b=[d0_f2, 1 - P0_2],
+                c=[b0_f2, P0_2],
+                mode='lines',
+                line=dict(color='cyan', dash='dot'),
                 showlegend=False
             ),
     row=1, col=4
@@ -1743,6 +1871,7 @@ for i, frame in enumerate(fig.frames):
     # b_ad, d_ad, u_ad = opinions_ad[i]
     # y_i = dirichlet_pdfs[i]
     P = b_f + prior * u_f
+    P2 = b_f2 + prior_2 * u_f2
     counts_i = counts_history[i]
     evidences_i = evidences[i]
     # counts_h2 = h2_count_history[i]
@@ -1783,7 +1912,13 @@ for i, frame in enumerate(fig.frames):
     new_data.append(go.Scatterternary(a=[0], b=[1 - P], c=[P], cliponaxis=False))
 
     new_data.append(
-        go.Scatterternary(a=[u_f, 0], b=[d_f, 1 - P], c=[b_f, P], mode='lines', line=dict(color='green', dash='dot'),
+        go.Scatterternary(a=[u_f, 0], b=[d_f, 1 - P], c=[b_f, P], mode='lines', line=dict(color='purple', dash='dot'),
+                          showlegend=False, cliponaxis=False))
+
+    new_data.append(go.Scatterternary(a=[0], b=[1 - P2], c=[P2], cliponaxis=False))
+
+    new_data.append(
+        go.Scatterternary(a=[u_f2, 0], b=[d_f2, 1 - P2], c=[b_f2, P2], mode='lines', line=dict(color='cyan', dash='dot'),
                           showlegend=False, cliponaxis=False))
 
     # new_data.append(
