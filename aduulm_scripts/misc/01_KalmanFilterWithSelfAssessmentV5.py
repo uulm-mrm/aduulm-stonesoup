@@ -20,6 +20,130 @@ from collections import deque
 from dataclasses import dataclass
 
 matplotlib.use('TkAgg')
+def sample_uniform_noise_from_cov(R, rng, spread_factor=(1.0, 1.0)):
+    R = np.asarray(R, dtype=float)
+
+    sigma = np.sqrt(np.diag(R))
+    spread_factor = np.asarray(spread_factor, dtype=float)
+
+    half_width = spread_factor * np.sqrt(3.0) * sigma
+
+    noise = rng.uniform(
+        low=-half_width,
+        high=half_width,
+        size=R.shape[0]
+    )
+
+    return noise.reshape(-1, 1)
+
+def sample_laplace_noise_from_cov(R, rng, spread_factor=1.0):
+    """
+    Zero-mean Laplace noise with same marginal variances as R
+    if spread_factor = 1.
+
+    spread_factor > 1 increases variance by spread_factor**2.
+    Assumes diagonal R.
+    """
+    R = np.asarray(R, dtype=float)
+
+    sigma = np.sqrt(np.diag(R))
+    scale = spread_factor * sigma / np.sqrt(2.0)
+
+    noise = rng.laplace(
+        loc=0.0,
+        scale=scale,
+        size=R.shape[0],
+    )
+
+    return noise.reshape(-1, 1)
+
+def sample_student_t_noise_from_cov(R, rng, df=3.0, spread_factor=1.0):
+    """
+    Zero-mean Student-t noise with same marginal variances as R
+    if spread_factor = 1 and df > 2.
+
+    Smaller df => heavier tails.
+    Typical choices:
+        df = 3: very heavy-tailed
+        df = 5: moderately heavy-tailed
+        df = 10: close to Gaussian
+    """
+    if df <= 2:
+        raise ValueError("df must be > 2 to have finite variance.")
+
+    R = np.asarray(R, dtype=float)
+
+    sigma = np.sqrt(np.diag(R))
+    scale = spread_factor * sigma * np.sqrt((df - 2.0) / df)
+
+    noise = rng.standard_t(df=df, size=R.shape[0]) * scale
+
+    return noise.reshape(-1, 1)
+
+def sample_bimodal_noise_from_cov(
+    R,
+    rng,
+    mode_distance=2.0,
+    mode_prob=0.5,
+    within_scale=0.3,
+    axis=0,
+):
+    """
+    Bimodal measurement noise.
+
+    Creates two modes along one measurement axis.
+
+    mode_distance is measured in sigma units.
+    within_scale controls the Gaussian spread within each mode.
+    """
+    R = np.asarray(R, dtype=float)
+
+    m = R.shape[0]
+    sigma = np.sqrt(np.diag(R))
+
+    noise = rng.normal(
+        loc=0.0,
+        scale=within_scale * sigma,
+        size=m,
+    )
+
+    sign = 1.0 if rng.uniform() < mode_prob else -1.0
+    noise[axis] += sign * mode_distance * sigma[axis]
+
+    return noise.reshape(-1, 1)
+
+def sample_truncated_gaussian_noise_from_cov(
+    R,
+    rng,
+    truncation_sigma=1.0,
+    max_tries=10_000,
+):
+    """
+    Samples from N(0, R) conditioned component-wise on
+    |v_i| <= truncation_sigma * sigma_i.
+
+    This keeps one measurement per timestep.
+    """
+    R = np.asarray(R, dtype=float)
+    sigma = np.sqrt(np.diag(R))
+    m = R.shape[0]
+
+    noise = np.zeros(m)
+
+    for dim in range(m):
+        for _ in range(max_tries):
+            candidate = rng.normal(loc=0.0, scale=sigma[dim])
+
+            if abs(candidate) <= truncation_sigma * sigma[dim]:
+                noise[dim] = candidate
+                break
+        else:
+            raise RuntimeError(
+                f"Could not sample truncated Gaussian for dim={dim}. "
+                f"Try larger truncation_sigma."
+            )
+
+    return noise.reshape(-1, 1)
 
 # %%
 from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
@@ -30,7 +154,7 @@ from stonesoup.types.array import StateVector, CovarianceMatrix
 from stonesoup.types.state import State, GaussianState
 
 start_time = datetime.now()
-np.random.seed(20) #2
+np.random.seed(0) #2
 
 # %%
 use_ct_model = False
@@ -60,7 +184,7 @@ import numpy as np
 # Ground-truth model parameters
 # ------------------------------------------------------------------
 dt = timedelta(seconds=0.1)
-num_steps = 900
+num_steps = 1300
 
 # CV model before and after the turn
 gt_cv_model = CombinedLinearGaussianTransitionModel([
@@ -78,8 +202,8 @@ turn_rate = np.radians(-20.0)
 gt_right_turn_model = KnownTurnRate([q_x, q_y], turn_rate)
 
 # Turn interval
-turn_start = 400
-turn_end = 450   # 60 steps at dt=0.1s -> 6 seconds
+turn_start = 800
+turn_end = 875   # 60 steps at dt=0.1s -> 6 seconds
 
 # ------------------------------------------------------------------
 # Initial ground truth
@@ -106,7 +230,7 @@ gt_transition_configs = {
     'disturb_noise_coeff': [True, False],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
-    'parameters': [[[700, disturbance_factor_process], [800, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
+    'parameters': [[[1000, disturbance_factor_process], [1200, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
 }
 
 # ------------------------------------------------------------------
@@ -230,18 +354,41 @@ gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
     'disturbance_mode': ['jump'],
-    'parameters': [[[100, disturbance_factor_meas], [200, 1/disturbance_factor_meas], [300, 1/disturbance_factor_meas], [350, disturbance_factor_meas]]]
+    'parameters': [[[200, disturbance_factor_meas], [300, 1/disturbance_factor_meas], [400, 1/disturbance_factor_meas], [500, disturbance_factor_meas]]],
+    'disturb_noise_coeff': [1, 1], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
 
 measurements = []
+rng = np.random.default_rng(1)
+alternative_noise_interval = list(range(600, 700))
+
 for truth in truths:
     for k, state in enumerate(truth):
 
         # Disturb the measurement model based on the disturbance modes
         gt_measurement_model = disturbance_measurement_noise(gt_measurement_model, gt_measurement_configs, k)
 
-        measurement = gt_measurement_model.function(state, noise=True)
+        if k in alternative_noise_interval:
+            measurement = gt_measurement_model.function(state, noise=False)
+            R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
+            # v = sample_uniform_noise_from_cov(R_true, rng, spread_factor=(1, 1))
+            # v = sample_laplace_noise_from_cov(R_true, rng, spread_factor=1)
+            # v = sample_student_t_noise_from_cov(
+            #     R_true,
+            #     rng,
+            #     df=3.0,
+            #     spread_factor=2.0,
+            # )
+            v = sample_truncated_gaussian_noise_from_cov(
+                R_true,
+                rng,
+                truncation_sigma=1.0,
+            )
+
+            measurement += v
+        else:
+            measurement = gt_measurement_model.function(state, noise=True)
         measurements.append(Detection(measurement,
                                       timestamp=state.timestamp,
                                       measurement_model=measurement_model))  # Filter-Messmodell für Update
@@ -251,12 +398,12 @@ for truth in truths:
 meas_bias_memory = []
 x_bias = -10
 y_bias = -10
-for i, measurement in enumerate(measurements):
-    if 600 <= i <= 650 and activate_disturbances:
-        measurement.state_vector += np.array([[x_bias], [y_bias]])
-        meas_bias_memory.append((x_bias, y_bias))
-    else:
-        meas_bias_memory.append((0, 0))
+# for i, measurement in enumerate(measurements):
+#     if 600 <= i <= 650 and activate_disturbances:
+#         measurement.state_vector += np.array([[x_bias], [y_bias]])
+#         meas_bias_memory.append((x_bias, y_bias))
+#     else:
+#         meas_bias_memory.append((0, 0))
 # %%
 # Plot the result, again mapping the x and y position values
 plotter.plot_measurements(measurements, [0, 2])
@@ -306,6 +453,7 @@ sa_settings = {
     "dim_meas": measurement_model.ndim_meas,
     "alpha_threshold_dc": 0.01,
     "trust_discount": 0.99,
+    # "type_compar" : 'elementwise'
 }
 selfassessor = KalmanSelfAssessor(num_X=sa_settings["num_X"],
                                   n_st=sa_settings["n_st"],
@@ -313,6 +461,7 @@ selfassessor = KalmanSelfAssessor(num_X=sa_settings["num_X"],
                                   dim_meas=sa_settings["dim_meas"],
                                   alpha_threshold_dc=sa_settings["alpha_threshold_dc"],
                                   trust_discount=sa_settings["trust_discount"],
+                                  # type_compar="elementwise"
                                   # threshold_ltst=0.267,
                                   )
 selfassessor_measures_history = []
@@ -678,7 +827,7 @@ for i, measurement in enumerate(measurements):
     if len(griebel_inno_window) > griebel_inno.window_length:
         griebel_inno_window.pop(0)
     griebel_results_opinion = sl.Fusion.fuse_opinions(sl.FusionType.CUMULATIVE, griebel_inno_window)
-    print(griebel_results_opinion)
+    # print(griebel_results_opinion)
     griebel_p_ok_history.append(griebel_results_opinion.getProjection()[0])
 
     fused_2_op_obj_history.append(griebel_results_opinion)
@@ -1280,6 +1429,7 @@ plt.plot(np.array(selfassessor_measures_history)[:, 2], label="Griebel SA Thresh
 # plt.plot(dc_adj_l2, label="dc_adj_l2")
 # plt.plot(dc_adj_kl, label="dc_adj_kl")
 # plt.plot([calc_threshold_n_diff(W, s, 0.1) for s in sums_of_evidence], label = "Griebel Th Dynamic")
+# plt.plot([adjusted_opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Th Norm")
 # plt.plot(kl_C_history, label="KL C")
 plt.yticks(np.linspace(0, 1, 11))
 plt.grid()

@@ -137,7 +137,12 @@ def disturbance_measurement_noise(measurement_model, gt_configs, k):
         elif dist_mode.lower() == 'jump':
             for z in gt_configs['parameters'][idx_dist_mode]:
                 if k == z[0]:
-                    measurement_model.noise_covar *= pow(z[1], 2)
+                    for i, comp in enumerate(gt_configs['disturb_noise_coeff']):
+                        if comp:
+                            if comp == 1:
+                                measurement_model.noise_covar[i, i] *= pow(z[1], 2)
+                            elif comp==2:
+                                measurement_model.noise_covar[i, i] *= pow(1/z[1], 2)
 
         elif dist_mode.lower() == 'drift':
             for z in gt_configs['parameters'][idx_dist_mode]:
