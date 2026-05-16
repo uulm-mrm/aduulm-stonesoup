@@ -223,11 +223,11 @@ process_noise_coeff_memory = [[], []]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 100 if activate_disturbances else 1 #16
+disturbance_factor_process = 16 if activate_disturbances else 1 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
-    'disturb_noise_coeff': [True, False],
+    'disturb_noise_coeff': [False, True],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
     'parameters': [[[1000, disturbance_factor_process], [1200, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
@@ -251,7 +251,7 @@ for k in range(1, num_steps + 1):
 
         if turn_start <= k < turn_end:
             gt_model = gt_right_turn_model
-            model_indices.append(2)  # right turn
+            model_indices.append(1)  # right turn
         else:
             gt_model = gt_cv_model
             model_indices.append(0)  # CV
@@ -358,6 +358,7 @@ gt_measurement_configs = {
     'disturb_noise_coeff': [1, 1], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
+meas_truncated_gaussian_memory = []
 
 measurements = []
 rng = np.random.default_rng(1)
@@ -368,7 +369,7 @@ for truth in truths:
 
         # Disturb the measurement model based on the disturbance modes
         gt_measurement_model = disturbance_measurement_noise(gt_measurement_model, gt_measurement_configs, k)
-
+        trunc_sigma = 0.0
         if k in alternative_noise_interval:
             measurement = gt_measurement_model.function(state, noise=False)
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
@@ -380,15 +381,19 @@ for truth in truths:
             #     df=3.0,
             #     spread_factor=2.0,
             # )
+            trunc_sigma = 1.0
             v = sample_truncated_gaussian_noise_from_cov(
                 R_true,
                 rng,
-                truncation_sigma=1.0,
+                truncation_sigma=trunc_sigma,
             )
 
             measurement += v
+            meas_truncated_gaussian_memory.append(trunc_sigma)
+
         else:
             measurement = gt_measurement_model.function(state, noise=True)
+            meas_truncated_gaussian_memory.append(trunc_sigma)
         measurements.append(Detection(measurement,
                                       timestamp=state.timestamp,
                                       measurement_model=measurement_model))  # Filter-Messmodell für Update
@@ -1172,6 +1177,8 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     p_ok_exp.append(op_exp_bin.getProjection()[0])
     # print(radial_window_op)
     # print(sum(radial_window_op.as_dirichlet().evidences))
+
+
 for opx, opy in zip(
     ops_component_x, ops_component_y,
 ):
@@ -1300,18 +1307,20 @@ plt.plot(model_indices, label="Chosen Model")
 
 plt.yticks(
     [0, 1, 2],
-    ["Straight", "Turn left", "Turn right"]
+    ["Straight", "Turn right", "Turn left"]
 )
 plt.grid()
 plt.legend()
 plt.title("Chosen Model")
 
 plt.figure()
-plt.plot(process_noise_coeff_memory[0], label="q_x")
-plt.plot(process_noise_coeff_memory[1], label="q_y")
 plt.plot([meas_std_dev_memory[i][0, 0] for i, mat in enumerate(meas_std_dev_memory)], label="meas_cov")
+plt.plot(meas_truncated_gaussian_memory, label="Truncate Gaussian")
 plt.plot([meas_bias_memory[i][0] for i in range(len(meas_bias_memory))], label="bias x")
 plt.plot([meas_bias_memory[i][1] for i in range(len(meas_bias_memory))], label="bias y")
+plt.plot(model_indices, label="Turn Right")
+plt.plot(process_noise_coeff_memory[0], label="q_x")
+plt.plot(process_noise_coeff_memory[1], label="q_y")
 plt.legend()
 plt.grid()
 plt.title("Disturbances")
@@ -1324,7 +1333,7 @@ plt.axhline(0.95, label="0.95")
 plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_history))], label="P_OK Radial")
 # plt.plot(p_ok_x, label="P_OK Comp X")
 # plt.plot(p_ok_y, label="P_OK Comp Y")
-# plt.plot(p_ok_comp, label="P_OK Comp Fused")
+plt.plot(p_ok_comp, label="P_OK Comp Fused")
 plt.plot(p_ok_overall, label="P_OK Overall")
 plt.plot([overall_binomial[i].uncertainty() for i in range(len(overall_binomial))], label="P_OK Uncertainty")
 plt.plot([fused_2_op_obj_history[i].uncertainty() for i in range(len(fused_2_op_obj_history))], label="Griebel Uncertainty")
@@ -1436,12 +1445,12 @@ plt.grid()
 plt.legend()
 plt.title("DCs")
 
-plt.figure()
-plt.plot([dc_ref[i] / opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Radial")
-plt.plot([dc_adj_l1[i] / adjusted_opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="L1 DC")
-plt.legend()
-plt.grid()
-plt.title("Signal")
+# plt.figure()
+# plt.plot([dc_ref[i] / opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="Radial")
+# plt.plot([dc_adj_l1[i] / adjusted_opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for i, s in enumerate(sums_of_evidence)], label="L1 DC")
+# plt.legend()
+# plt.grid()
+# plt.title("Signal")
 
 fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
 # --- Radial ---
@@ -1478,13 +1487,15 @@ plt.figure()
 # plt.plot(dc_ltst, label="DC LTST")
 # plt.plot(dc_white_x, label="DC White X")
 # plt.plot(dc_white_y, label="DC White Y")
-plt.plot(dc_comp_x, label="DC Comp X")
-plt.plot(dc_comp_y, label="DC Comp Y")
-plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_x], label = "Th x", color="blue", alpha=0.5)
-plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence_y], label = "Th y", color="orange", alpha=0.5)
+# plt.plot(dc_comp_x, label="DC Comp X")
+# plt.plot(dc_comp_y, label="DC Comp Y")
+# plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.01"] for s in sums_of_evidence_x], label = "Th x", color="blue", alpha=0.5)
+# plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.01"] for s in sums_of_evidence_y], label = "Th y", color="orange", alpha=0.5)
+plt.plot(p_ok_x, label="P_OK Comp X")
+plt.plot(p_ok_y, label="P_OK Comp Y")
 plt.legend()
 plt.grid()
-plt.title("DC Local")
+plt.title("P_OK Local")
 
 # plt.figure()
 # plt.plot([chisquare_uniform_test(e, 0.01)['reject_H0'] for e in evidences], label="Reject H0")
