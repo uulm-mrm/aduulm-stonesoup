@@ -21,10 +21,10 @@
   "disturbance_factor_meas": 4.0,
   "meas_disturb_k1": 200,
   "meas_disturb_k2": 300,
-  "meas_disturb_k3": 400,
-  "meas_disturb_k4": 500,
   "disturb_noise_coeff_x": 1,
   "disturb_noise_coeff_y": 1,
+  "correlated_start": 400,
+  "correlated_end": 500,
   "truncated_start": 600,
   "truncated_end": 700,
   "truncation_sigma": 1.0,
@@ -49,5 +49,8 @@
   "output_dir": "mc_results",
   "output_prefix": "mc_kalman_sa",
   "save_plot": true,
-  "show_plot": true
+  "show_plot": false,
+  "show_quantile_band": true,
+  "save_uncertainty_plots": true,
+  "overlay_uncertainty_in_pok_plots": false
 }

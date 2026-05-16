@@ -145,6 +145,87 @@ def sample_truncated_gaussian_noise_from_cov(
 
     return noise.reshape(-1, 1)
 
+def sample_correlated_gaussian_noise_from_cov(
+    R,
+    rng,
+    rho=0.8,
+):
+    """
+    Samples zero-mean Gaussian measurement noise with the same marginal
+    variances as R, but with correlation rho between x and y.
+
+    The filter may still assume diagonal R, so the marginal variances are
+    correct but the joint covariance structure is wrong.
+    """
+    R = np.asarray(R, dtype=float)
+
+    if R.shape != (2, 2):
+        raise ValueError("This function assumes a 2D measurement covariance.")
+
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("rho must be in (-1, 1).")
+
+    sigma = np.sqrt(np.diag(R))
+
+    R_corr = np.array([
+        [sigma[0] ** 2, rho * sigma[0] * sigma[1]],
+        [rho * sigma[0] * sigma[1], sigma[1] ** 2],
+    ])
+
+    noise = rng.multivariate_normal(
+        mean=np.zeros(2),
+        cov=R_corr,
+    )
+
+    return noise.reshape(-1, 1)
+
+def sample_diagonal_mixture_noise_from_cov(
+    R,
+    rng,
+    spread_factor=1.0,
+):
+    """
+    Measurement-level diagonal-mixture noise.
+
+    Construction:
+        z ~ N(0, 1)
+        s in {-1, +1} with equal probability
+
+        v_x = sigma_x * z
+        v_y = sigma_y * s * z
+
+    Marginals:
+        v_x ~ N(0, R_xx)
+        v_y ~ N(0, R_yy)
+
+    Joint distribution:
+        not bivariate Gaussian; samples lie on two diagonals.
+
+    If spread_factor = 1:
+        marginal variances match R.
+
+    If spread_factor > 1:
+        marginal variances are increased, so components may also react.
+        For the radial-only demonstration, keep spread_factor = 1.
+    """
+    R = np.asarray(R, dtype=float)
+
+    if R.shape != (2, 2):
+        raise ValueError("This function assumes a 2D measurement covariance.")
+
+    sigma = np.sqrt(np.diag(R))
+
+    z = rng.normal(loc=0.0, scale=1.0)
+    s = 1.0 if rng.uniform() < 0.5 else -1.0
+
+    noise = np.array([
+        sigma[0] * z,
+        sigma[1] * s * z,
+    ])
+
+    noise = spread_factor * noise
+
+    return noise.reshape(-1, 1)
 # %%
 from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
 from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel, \
@@ -358,6 +439,7 @@ gt_measurement_configs = {
     'disturb_noise_coeff': [1, 1], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
+meas_correlated_gaussian_memory = []
 meas_truncated_gaussian_memory = []
 
 measurements = []
@@ -394,6 +476,7 @@ for truth in truths:
         else:
             measurement = gt_measurement_model.function(state, noise=True)
             meas_truncated_gaussian_memory.append(trunc_sigma)
+            meas_correlated_gaussian_memory.append(0)
         measurements.append(Detection(measurement,
                                       timestamp=state.timestamp,
                                       measurement_model=measurement_model))  # Filter-Messmodell für Update
@@ -729,6 +812,7 @@ C_history = []
 K_history = []
 eta_history = []
 nu_white_history = []
+nu_white_full_history = []
 counts_history = []
 
 
@@ -873,6 +957,8 @@ for i, measurement in enumerate(measurements):
 
     S_sqrt = robust_cholesky(S)
     nu_white = np.linalg.solve(S_sqrt, delta).flatten()
+    nu_white_full_history.append(nu_white.copy())
+
     nu_white_history.append(nu_white.copy())
     if len(nu_white_history) > max_buffer:
         nu_white_history.pop(0)
@@ -1021,31 +1107,6 @@ for i, measurement in enumerate(measurements):
     belief_history.append(kl_opinion.belief())
     disbelief_history.append(kl_opinion.disbelief())
     uncertainty_history.append(kl_opinion.uncertainty())
-
-
-
-
-# plt.plot(list(range(len(C_history))), C_history)
-# plt.title("C_history")
-# plt.figure()
-# plt.plot(belief_history, label="Belief")
-# # plt.plot(disbelief_history, label="Disbelief")
-# plt.plot(uncertainty_history, label="Uncertainty")
-# plt.plot(p_s_history, label="Projection")
-# plt.legend()
-# plt.title("Global Opinion")
-# plt.figure()
-# plt.plot(decision_history, label="Decision")
-# plt.figure()
-# plt.plot([0, len(belief_history)], [0.5, 0.5], "r--")
-# plt.plot(p_s_history, label="Projection (global)", linewidth=3, zorder=100)
-# plt.plot([h1.getProjection()[0] for h1 in h1_r_op_history], label="Projection (H1)")
-# plt.plot([h2.getProjection()[0] for h2 in h2_q_op_history], label="Projection (H2)")
-# plt.plot([h3.getProjection()[0] for h3 in h3_ng_op_history], label="Projection (H3)")
-# plt.plot([h4.getProjection()[0] for h4 in h4_bias_op_history], label="Projection (H4)")
-# plt.plot([h5.getProjection()[0] for h5 in h5_white_op_history], label="Projection (H5)")
-# plt.title("Opinions")
-# plt.legend()
 
 
 # %%

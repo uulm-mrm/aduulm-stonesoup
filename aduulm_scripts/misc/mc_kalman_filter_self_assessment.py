@@ -107,13 +107,15 @@ class ExperimentConfig:
     disturbance_factor_meas: float = 4.0
     meas_disturb_k1: int = 200
     meas_disturb_k2: int = 300
-    meas_disturb_k3: int = 400
-    meas_disturb_k4: int = 500
+    # meas_disturb_k3: int = 400
+    # meas_disturb_k4: int = 500
     # V6 uses [1,1]; both dimensions are affected
     disturb_noise_coeff_x: int = 1
     disturb_noise_coeff_y: int = 1
 
     # Truncated-Gaussian measurement-noise disturbance, as in V6
+    correlated_start: int = 400
+    correlated_end: int = 500
     truncated_start: int = 600
     truncated_end: int = 700
     truncation_sigma: float = 1.0
@@ -142,12 +144,49 @@ class ExperimentConfig:
     output_dir: str = "mc_results"
     output_prefix: str = "mc_kalman_sa"
     save_plot: bool = True
-    show_plot: bool = True
+    show_plot: bool = False
+    show_quantile_band: bool = True
+    save_uncertainty_plots: bool = True
+    overlay_uncertainty_in_pok_plots: bool = False
 
 
 # -----------------------------------------------------------------------------
 # Noise models / utility functions
 # -----------------------------------------------------------------------------
+
+def sample_correlated_gaussian_noise_from_cov(
+    R,
+    rng,
+    rho=0.8,
+):
+    """
+    Samples zero-mean Gaussian measurement noise with the same marginal
+    variances as R, but with correlation rho between x and y.
+
+    The filter may still assume diagonal R, so the marginal variances are
+    correct but the joint covariance structure is wrong.
+    """
+    R = np.asarray(R, dtype=float)
+
+    if R.shape != (2, 2):
+        raise ValueError("This function assumes a 2D measurement covariance.")
+
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("rho must be in (-1, 1).")
+
+    sigma = np.sqrt(np.diag(R))
+
+    R_corr = np.array([
+        [sigma[0] ** 2, rho * sigma[0] * sigma[1]],
+        [rho * sigma[0] * sigma[1], sigma[1] ** 2],
+    ])
+
+    noise = rng.multivariate_normal(
+        mean=np.zeros(2),
+        cov=R_corr,
+    )
+
+    return noise.reshape(-1, 1)
 
 def sample_truncated_gaussian_noise_from_cov(
     R: np.ndarray,
@@ -391,20 +430,22 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
         "parameters": [[
             [config.meas_disturb_k1, disturbance_factor_meas],
             [config.meas_disturb_k2, 1.0 / disturbance_factor_meas],
-            [config.meas_disturb_k3, 1.0 / disturbance_factor_meas],
-            [config.meas_disturb_k4, disturbance_factor_meas],
+            # [config.meas_disturb_k3, 1.0 / disturbance_factor_meas],
+            # [config.meas_disturb_k4, disturbance_factor_meas],
         ]],
         "disturb_noise_coeff": [config.disturb_noise_coeff_x, config.disturb_noise_coeff_y],
     }
 
     measurements = []
     meas_std_dev_memory = []
+    meas_correlated_gaussian_memory = []
     meas_truncated_gaussian_memory = []
 
     for k, state in enumerate(truth):
         gt_measurement_model = disturbance_measurement_noise(gt_measurement_model, gt_measurement_configs, k)
 
         trunc_sigma = 0.0
+        correlation_activated = 0
         if config.truncated_start <= k < config.truncated_end:
             measurement = gt_measurement_model.function(state, noise=False)
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
@@ -414,6 +455,17 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
                 rng,
                 truncation_sigma=trunc_sigma,
             )
+        elif config.correlated_start <= k < config.correlated_end:
+            measurement = gt_measurement_model.function(state, noise=False)
+            R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
+
+            measurement += sample_correlated_gaussian_noise_from_cov(
+                R_true,
+                rng,
+                rho=0.9999
+            )
+            correlation_activated = 1
+
         else:
             measurement = gt_measurement_model.function(state, noise=True)
 
@@ -425,6 +477,7 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
             )
         )
         meas_std_dev_memory.append(np.sqrt(gt_measurement_model.noise_covar))
+        meas_correlated_gaussian_memory.append(correlation_activated)
         meas_truncated_gaussian_memory.append(trunc_sigma)
 
     return measurements, np.asarray(meas_truncated_gaussian_memory), meas_std_dev_memory
@@ -726,7 +779,7 @@ def save_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
     with config_path.open("w") as f:
         json.dump(asdict(config), f, indent=2)
 
-    # CSV with mean and quantile series for the core projected probabilities
+    # CSV with mean and quantile series for the exported core time series
     csv_path = out_dir / f"{config.output_prefix}_time_series.csv"
     core_keys = [
         "p_ok_griebel_innovation",
@@ -771,69 +824,127 @@ def save_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
 
 def plot_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: ExperimentConfig):
     import matplotlib
-    matplotlib.use("TkAgg")
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     out_dir = Path(config.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def plot_with_band(ax, key: str, label: str):
+    def plot_series(ax, key: str, label: str, *, linestyle: str = "-", alpha: float = 1.0):
         x = np.arange(len(mc_results[key]["mean"]))
         mean = mc_results[key]["mean"]
-        q05 = mc_results[key]["q05"]
-        q95 = mc_results[key]["q95"]
-        ax.plot(x, mean, label=label)
-        ax.fill_between(x, q05, q95, alpha=0.15)
+        line, = ax.plot(x, mean, label=label, linestyle=linestyle, alpha=alpha)
+        if config.show_quantile_band:
+            q05 = mc_results[key]["q05"]
+            q95 = mc_results[key]["q95"]
+            ax.fill_between(x, q05, q95, alpha=0.15, color=line.get_color())
+
+    def add_disturbance_spans(ax):
+        disturbance_spans = [
+            (config.meas_disturb_k1, config.meas_disturb_k2, "#fee5e5", "measurement noise x4"),
+            # (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", "measurement noise x1/4"),
+            (config.correlated_start, config.correlated_end, "#fcb7b7", "correlated Gaussian"),
+            (config.truncated_start, config.truncated_end, "#fc8d8d", "truncated Gaussian"),
+            (config.turn_start, config.turn_end, "#ef3b2c", "turn / model mismatch"),
+            (config.process_disturb_start, config.process_disturb_end, "#b30000", "process noise disturbance"),
+        ]
+        if config.use_forced_half_innovation:
+            disturbance_spans.append(
+                (config.forced_half_start, config.forced_half_end, "#67000d", "forced half innovation")
+            )
+
+        for start, end, color, label in disturbance_spans:
+            if start < end:
+                ax.axvspan(start, end, alpha=0.20, color=color, label=label)
+
+    def finalize_axes(ax, ylabel: str, title: str):
+        ax.set_xlabel("time step")
+        ax.set_ylabel(ylabel)
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True)
+        ax.legend(loc="best")
+        ax.set_title(title)
+
+    def save_figure(fig, stem: str) -> Tuple[Path, Path]:
+        png = out_dir / f"{config.output_prefix}_{stem}.png"
+        pdf = out_dir / f"{config.output_prefix}_{stem}.pdf"
+        fig.tight_layout()
+        fig.savefig(png, dpi=200)
+        fig.savefig(pdf)
+        if config.show_plot:
+            plt.show()
+        plt.close(fig)
+        return png, pdf
+
+    main_pairs = [
+        ("p_ok_griebel_innovation", "Griebel innovation $P_{OK}$"),
+        ("p_ok_radial", "Proposed radial $P_{OK}$"),
+        ("p_ok_comp", "Proposed component $P_{OK}$"),
+        ("p_ok_overall", "Proposed overall $P_{OK}$"),
+    ]
+    main_uncertainty_pairs = [
+        ("u_griebel_innovation", "Griebel innovation uncertainty"),
+        ("griebel_multinomial_uncertainty", "Griebel multinomial uncertainty"),
+        ("u_radial", "Proposed radial uncertainty"),
+        ("u_comp", "Proposed component uncertainty"),
+        ("u_overall", "Proposed overall uncertainty"),
+    ]
+    component_pairs = [
+        ("p_ok_x", "$P_{OK,x}$"),
+        ("p_ok_y", "$P_{OK,y}$"),
+    ]
+    component_uncertainty_pairs = [
+        ("u_x", "$u_x$"),
+        ("u_y", "$u_y$"),
+    ]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    plot_with_band(ax, "p_ok_griebel_innovation", "Griebel innovation $P_{OK}$")
-    plot_with_band(ax, "p_ok_radial", "Proposed radial $P_{OK}$")
-    plot_with_band(ax, "p_ok_comp", "Proposed component $P_{OK}$")
-    plot_with_band(ax, "p_ok_overall", "Proposed overall $P_{OK}$")
+    for key, label in main_pairs:
+        plot_series(ax, key, label)
+    if config.overlay_uncertainty_in_pok_plots:
+        for key, label in main_uncertainty_pairs:
+            plot_series(ax, key, f"{label} (overlay)", linestyle="--", alpha=0.85)
+    add_disturbance_spans(ax)
+    finalize_axes(ax, r"projected probability $P_{OK}$", f"Monte Carlo mean projected probabilities, N={config.n_mc}")
+    png_path, pdf_path = save_figure(fig, "projected_probabilities")
 
-    if config.truncated_start < config.truncated_end:
-        ax.axvspan(config.truncated_start, config.truncated_end, alpha=0.12, label="truncated Gaussian")
-    if config.turn_start < config.turn_end:
-        ax.axvspan(config.turn_start, config.turn_end, alpha=0.08, label="turn / model mismatch")
-    if config.process_disturb_start < config.process_disturb_end:
-        ax.axvspan(config.process_disturb_start, config.process_disturb_end, alpha=0.06, label="process noise disturbance")
-
-    ax.set_xlabel("time step")
-    ax.set_ylabel(r"projected probability $P_{OK}$")
-    ax.set_ylim(0.0, 1.05)
-    ax.grid(True)
-    ax.legend(loc="best")
-    ax.set_title(f"Monte Carlo mean projected probabilities, N={config.n_mc}")
-    fig.tight_layout()
-
-    png_path = out_dir / f"{config.output_prefix}_projected_probabilities.png"
-    pdf_path = out_dir / f"{config.output_prefix}_projected_probabilities.pdf"
-    fig.savefig(png_path, dpi=200)
-    fig.savefig(pdf_path)
-
-    if config.show_plot:
-        plt.show()
-    plt.close(fig)
-
-    # Local component plot
     fig, ax = plt.subplots(figsize=(10, 4))
-    plot_with_band(ax, "p_ok_x", "$P_{OK,x}$")
-    plot_with_band(ax, "p_ok_y", "$P_{OK,y}$")
-    ax.axvspan(config.truncated_start, config.truncated_end, alpha=0.12, label="truncated Gaussian")
-    ax.set_xlabel("time step")
-    ax.set_ylabel(r"projected probability $P_{OK}$")
-    ax.set_ylim(0.0, 1.05)
-    ax.grid(True)
-    ax.legend(loc="best")
-    ax.set_title(f"Component-wise projected probabilities, N={config.n_mc}")
-    fig.tight_layout()
-    comp_png = out_dir / f"{config.output_prefix}_component_projected_probabilities.png"
-    comp_pdf = out_dir / f"{config.output_prefix}_component_projected_probabilities.pdf"
-    fig.savefig(comp_png, dpi=200)
-    fig.savefig(comp_pdf)
-    plt.close(fig)
+    for key, label in component_pairs:
+        plot_series(ax, key, label)
+    if config.overlay_uncertainty_in_pok_plots:
+        for key, label in component_uncertainty_pairs:
+            plot_series(ax, key, f"{label} uncertainty (overlay)", linestyle="--", alpha=0.85)
+    add_disturbance_spans(ax)
+    finalize_axes(ax, r"projected probability $P_{OK}$", f"Component-wise projected probabilities, N={config.n_mc}")
+    comp_png, comp_pdf = save_figure(fig, "component_projected_probabilities")
 
-    return {"main_png": png_path, "main_pdf": pdf_path, "component_png": comp_png, "component_pdf": comp_pdf}
+    result_paths = {
+        "main_png": png_path,
+        "main_pdf": pdf_path,
+        "component_png": comp_png,
+        "component_pdf": comp_pdf,
+    }
+
+    if config.save_uncertainty_plots:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for key, label in main_uncertainty_pairs:
+            plot_series(ax, key, label)
+        add_disturbance_spans(ax)
+        finalize_axes(ax, "uncertainty", f"Monte Carlo mean opinion uncertainties, N={config.n_mc}")
+        unc_png, unc_pdf = save_figure(fig, "uncertainties")
+        result_paths["uncertainty_png"] = unc_png
+        result_paths["uncertainty_pdf"] = unc_pdf
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for key, label in component_uncertainty_pairs:
+            plot_series(ax, key, label)
+        add_disturbance_spans(ax)
+        finalize_axes(ax, "uncertainty", f"Component-wise opinion uncertainties, N={config.n_mc}")
+        comp_unc_png, comp_unc_pdf = save_figure(fig, "component_uncertainties")
+        result_paths["component_uncertainty_png"] = comp_unc_png
+        result_paths["component_uncertainty_pdf"] = comp_unc_pdf
+
+    return result_paths
 
 
 def parse_args() -> argparse.Namespace:
@@ -843,6 +954,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=str, default="mc_results", help="Output directory.")
     parser.add_argument("--output-prefix", type=str, default="mc_kalman_sa", help="Output filename prefix.")
     parser.add_argument("--no-plot", action="store_true", help="Do not generate static plots.")
+    parser.add_argument("--no-quantile-band", action="store_true", help="Disable q05-q95 fill_between bands in plots.")
+    parser.add_argument("--no-uncertainty-plots", action="store_true", help="Do not generate dedicated uncertainty plots.")
+    parser.add_argument("--overlay-uncertainty", action="store_true", help="Overlay uncertainty curves in the projected-probability plots.")
     parser.add_argument("--forced-half-innovation", action="store_true", help="Enable signed-half-Gaussian innovation counterexample.")
     return parser.parse_args()
 
@@ -855,6 +969,9 @@ def main() -> None:
         output_dir=args.output_dir,
         output_prefix=args.output_prefix,
         save_plot=not args.no_plot,
+        show_quantile_band=not args.no_quantile_band,
+        save_uncertainty_plots=not args.no_uncertainty_plots,
+        overlay_uncertainty_in_pok_plots=args.overlay_uncertainty,
         use_forced_half_innovation=args.forced_half_innovation,
     )
 
