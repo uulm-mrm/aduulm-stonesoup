@@ -97,14 +97,14 @@ class ExperimentConfig:
     turn_rate_deg_s: float = -20.0
 
     # GT process-noise disturbance, as in V6
-    disturbance_factor_process: float = 25.0
+    disturbance_factor_process: float = 32
     process_disturb_start: int = 1000
     process_disturb_end: int = 1200
-    disturb_x: bool = False
-    disturb_y: bool = True
+    disturb_x: bool = True
+    disturb_y: bool = False
 
     # Measurement covariance disturbance, as in V6
-    disturbance_factor_meas: float = 4.0
+    disturbance_factor_meas: float = 2.0
     meas_disturb_k1: int = 200
     meas_disturb_k2: int = 300
     meas_disturb_k3: int = 400
@@ -116,6 +116,8 @@ class ExperimentConfig:
     # Truncated-Gaussian measurement-noise disturbance, as in V6
     correlated_start: int = -1
     correlated_end: int = -1
+    diagonal_start: int = -1
+    diagonal_end: int = -1
     truncated_start: int = 600
     truncated_end: int = 700
     truncation_sigma: float = 1.0
@@ -153,6 +155,56 @@ class ExperimentConfig:
 # -----------------------------------------------------------------------------
 # Noise models / utility functions
 # -----------------------------------------------------------------------------
+
+from scipy.stats import norm
+import numpy as np
+
+def sample_shift_copula_noise_from_cov(
+    R,
+    rng,
+    shift=0.5,
+    eps=1e-12,
+):
+    """
+    Measurement noise with exactly Gaussian marginals but a non-Gaussian
+    deterministic copula.
+
+    U ~ Uniform(0,1)
+    w_x = Phi^{-1}(U)
+    w_y = Phi^{-1}((U + shift) mod 1)
+
+    Marginals:
+        w_x ~ N(0,1)
+        w_y ~ N(0,1)
+
+    Joint:
+        strongly non-Gaussian.
+
+    For shift=0.5, extremes in one component are paired with central
+    values in the other component.
+    """
+    R = np.asarray(R, dtype=float)
+
+    if R.shape != (2, 2):
+        raise ValueError("This function assumes a 2D measurement covariance.")
+
+    sigma = np.sqrt(np.diag(R))
+
+    u = rng.uniform(0.0, 1.0)
+    v = (u + shift) % 1.0
+
+    u = np.clip(u, eps, 1.0 - eps)
+    v = np.clip(v, eps, 1.0 - eps)
+
+    w_x = norm.ppf(u)
+    w_y = norm.ppf(v)
+
+    noise = np.array([
+        sigma[0] * w_x,
+        sigma[1] * w_y,
+    ])
+
+    return noise.reshape(-1, 1)
 
 def sample_correlated_gaussian_noise_from_cov(
     R,
@@ -428,12 +480,12 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
     gt_measurement_configs = {
         "disturbance_mode": ["jump"],
         "parameters": [[
-            [config.meas_disturb_k1, disturbance_factor_meas],
-            [config.meas_disturb_k2, 1.0 / disturbance_factor_meas],
-            [config.meas_disturb_k3, 1.0 / disturbance_factor_meas],
-            [config.meas_disturb_k4, disturbance_factor_meas],
+            [config.meas_disturb_k1, disturbance_factor_meas, [1, 0]],
+            [config.meas_disturb_k2, 1.0 / disturbance_factor_meas, [1, 0]],
+            [config.meas_disturb_k3, 1.0 / disturbance_factor_meas, [1, 1]],
+            [config.meas_disturb_k4, disturbance_factor_meas, [1, 1]],
         ]],
-        "disturb_noise_coeff": [config.disturb_noise_coeff_x, config.disturb_noise_coeff_y],
+        # "disturb_noise_coeff": [config.disturb_noise_coeff_x, config.disturb_noise_coeff_y],
     }
 
     measurements = []
@@ -465,7 +517,14 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
                 rho=0.9999
             )
             correlation_activated = 1
+        elif config.diagonal_start <= k < config.diagonal_end and config.activate_disturbances:
+            measurement = gt_measurement_model.function(state, noise=False)
+            R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
 
+            measurement += sample_shift_copula_noise_from_cov(
+                R_true,
+                rng,
+            )
         else:
             measurement = gt_measurement_model.function(state, noise=True)
 
@@ -841,9 +900,10 @@ def plot_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
 
     def add_disturbance_spans(ax):
         disturbance_spans = [
-            (config.meas_disturb_k1, config.meas_disturb_k2, "#fee5e5", "measurement noise x4"),
-            (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", "measurement noise x1/4"),
+            (config.meas_disturb_k1, config.meas_disturb_k2, "#fee5e5", f"measurement noise x{config.disturbance_factor_meas}"),
+            (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", f"measurement noise x1/{config.disturbance_factor_meas}"),
             # (config.correlated_start, config.correlated_end, "#fcb7b7", "correlated Gaussian"),
+            # (config.diagonal_start, config.diagonal_end, "#fcb7b7", "diagonalized Gaussian"),
             (config.truncated_start, config.truncated_end, "#fc8d8d", "truncated Gaussian"),
             (config.turn_start, config.turn_end, "#ef3b2c", "turn / model mismatch"),
             (config.process_disturb_start, config.process_disturb_end, "#b30000", "process noise disturbance"),

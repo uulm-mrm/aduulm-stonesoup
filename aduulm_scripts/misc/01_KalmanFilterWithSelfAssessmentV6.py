@@ -227,37 +227,48 @@ def sample_diagonal_mixture_noise_from_cov(
 
     return noise.reshape(-1, 1)
 
-def sample_correlated_gaussian_noise_from_cov(
+
+def sample_diagonal_mixture_noise_from_cov(
     R,
     rng,
-    rho=0.8,
+    spread_factor=1.0,
 ):
     """
-    Samples zero-mean Gaussian measurement noise with the same marginal
-    variances as R, but with correlation rho between x and y.
+    Measurement-level diagonal-mixture noise.
 
-    The filter may still assume diagonal R, so the marginal variances are
-    correct but the joint covariance structure is wrong.
+    Construction:
+        z ~ N(0, 1)
+        s in {-1, +1} with equal probability
+
+        v_x = sigma_x * z
+        v_y = sigma_y * s * z
+
+    Marginals:
+        v_x ~ N(0, R_xx)
+        v_y ~ N(0, R_yy)
+
+    Joint distribution:
+        not bivariate Gaussian; samples lie on two diagonals.
+
+    If spread_factor = 1:
+        marginal variances match R.
     """
     R = np.asarray(R, dtype=float)
 
     if R.shape != (2, 2):
         raise ValueError("This function assumes a 2D measurement covariance.")
 
-    if not (-1.0 < rho < 1.0):
-        raise ValueError("rho must be in (-1, 1).")
-
     sigma = np.sqrt(np.diag(R))
 
-    R_corr = np.array([
-        [sigma[0] ** 2, rho * sigma[0] * sigma[1]],
-        [rho * sigma[0] * sigma[1], sigma[1] ** 2],
+    z = rng.normal(loc=0.0, scale=1.0)
+    s = 1.0 if rng.uniform() < 0.5 else -1.0
+
+    noise = np.array([
+        sigma[0] * z,
+        sigma[1] * s * z,
     ])
 
-    noise = rng.multivariate_normal(
-        mean=np.zeros(2),
-        cov=R_corr,
-    )
+    noise = spread_factor * noise
 
     return noise.reshape(-1, 1)
 # %%
@@ -272,8 +283,8 @@ start_time = datetime.now()
 np.random.seed(0) #2
 
 # %%
-use_ct_model = True
-activate_disturbances = False
+use_ct_model = False
+activate_disturbances = True
 q_x   = 0.25   # Geschwindigkeitsrauschen (σ_vvel)
 q_y   = 0.25
 if use_ct_model:
@@ -338,7 +349,7 @@ process_noise_coeff_memory = [[], []]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 16 if activate_disturbances else 1 #16
+disturbance_factor_process = 20 if activate_disturbances else 1 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
@@ -465,13 +476,13 @@ stationary_measurement_model = deepcopy(measurement_model)
 # Import the disturbance method for the measurement model
 from aduulm_scripts.utils.add_disturbance import disturbance_measurement_noise
 # Disturbance configurations for measurement generation
-disturbance_factor_meas = 4 if activate_disturbances else 1 #4
+disturbance_factor_meas = 2 if activate_disturbances else 1 #4
 gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
     'disturbance_mode': ['jump'],
-    'parameters': [[[200, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]], #[400, 1/disturbance_factor_meas], [500, disturbance_factor_meas]]],
-    'disturb_noise_coeff': [1, 1], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
+    'parameters': [[[200, disturbance_factor_meas, [1, 0]], [300, 1/disturbance_factor_meas, [1, 0]], [400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]]],
+    # 'disturb_noise_coeff': [[1, 0], [1, 1]], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
 meas_correlated_gaussian_memory = []
@@ -479,7 +490,7 @@ meas_truncated_gaussian_memory = []
 
 measurements = []
 rng = np.random.default_rng(1)
-correlated_noise_interval = list(range(400, 500))
+correlated_noise_interval = [] #list(range(400, 500))
 alternative_noise_interval = list(range(600, 700))
 
 for truth in truths:
@@ -513,10 +524,9 @@ for truth in truths:
 
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
 
-            v = sample_correlated_gaussian_noise_from_cov(
+            v = sample_diagonal_mixture_noise_from_cov(
                 R_true,
                 rng,
-                rho=0.9999,
             )
 
             measurement = measurement + v
@@ -1367,7 +1377,7 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     dc_adj_l1.append(dc_l1_norm)
 
     op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
-    op_l1.prior_belief_masses = [0.99, 0.01]
+    # op_l1.prior_belief_masses = [0.99, 0.01]
     # L2
     d2_max = np.sqrt(1.0 - 1.0 / W)
     dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
@@ -1395,7 +1405,7 @@ p_ok_comp = []
 p_ok_overall = []
 
 
-prior_ok = 0.99 # float(np.sqrt(0.5))
+prior_ok = float(np.sqrt(0.5))
 
 for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     opx, opy = ops
@@ -1410,7 +1420,8 @@ for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     component_binomial.append(component_op)
     # print(i, "Compon:", component_op)
     # print(i, "Radial:", global_op_history[i])
-    overall_op = component_op.multiply(global_op_history[i])  #sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, [component_op, global_op_history[i]])
+    # overall_op = component_op.multiply(global_op_history[i])
+    overall_op = sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [component_op, global_op_history[i]])
     overall_binomial.append(overall_op)
     # print(i, "Overall:", overall_op)
 
