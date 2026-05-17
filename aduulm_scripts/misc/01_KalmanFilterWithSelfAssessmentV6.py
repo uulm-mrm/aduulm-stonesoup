@@ -226,6 +226,40 @@ def sample_diagonal_mixture_noise_from_cov(
     noise = spread_factor * noise
 
     return noise.reshape(-1, 1)
+
+def sample_correlated_gaussian_noise_from_cov(
+    R,
+    rng,
+    rho=0.8,
+):
+    """
+    Samples zero-mean Gaussian measurement noise with the same marginal
+    variances as R, but with correlation rho between x and y.
+
+    The filter may still assume diagonal R, so the marginal variances are
+    correct but the joint covariance structure is wrong.
+    """
+    R = np.asarray(R, dtype=float)
+
+    if R.shape != (2, 2):
+        raise ValueError("This function assumes a 2D measurement covariance.")
+
+    if not (-1.0 < rho < 1.0):
+        raise ValueError("rho must be in (-1, 1).")
+
+    sigma = np.sqrt(np.diag(R))
+
+    R_corr = np.array([
+        [sigma[0] ** 2, rho * sigma[0] * sigma[1]],
+        [rho * sigma[0] * sigma[1], sigma[1] ** 2],
+    ])
+
+    noise = rng.multivariate_normal(
+        mean=np.zeros(2),
+        cov=R_corr,
+    )
+
+    return noise.reshape(-1, 1)
 # %%
 from stonesoup.types.groundtruth import GroundTruthPath, GroundTruthState
 from stonesoup.models.transition.linear import CombinedLinearGaussianTransitionModel, \
@@ -238,8 +272,8 @@ start_time = datetime.now()
 np.random.seed(0) #2
 
 # %%
-use_ct_model = False
-activate_disturbances = True
+use_ct_model = True
+activate_disturbances = False
 q_x   = 0.25   # Geschwindigkeitsrauschen (σ_vvel)
 q_y   = 0.25
 if use_ct_model:
@@ -400,19 +434,20 @@ import numpy as np
 
 # %%
 # GT-Messmodell: 4D [x, vx, y, vy] – GT läuft mit KnownTurnRate (4D)
+meas_cov = 1
 gt_measurement_model = LinearGaussian(
     ndim_state=4,
     mapping=(0, 2),
-    noise_covar=np.array([[1, 0],
-                          [0, 1]])
+    noise_covar=np.array([[meas_cov, 0],
+                          [0, meas_cov]])
 )
 # Filter-Messmodell: 5D [x, vx, y, vy, omega] – CTRV-State
 # mapping=(0, 2): misst x (Index 0) und y (Index 2)
 measurement_model = LinearGaussian(
     ndim_state=5 if use_ct_model else 4,
     mapping=(0, 2),
-    noise_covar=np.array([[1, 0],
-                          [0, 1]])
+    noise_covar=np.array([[meas_cov, 0],
+                          [0, meas_cov]])
 )
 
 # %%
@@ -435,7 +470,7 @@ gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
     'disturbance_mode': ['jump'],
-    'parameters': [[[200, disturbance_factor_meas], [300, 1/disturbance_factor_meas], [400, 1/disturbance_factor_meas], [500, disturbance_factor_meas]]],
+    'parameters': [[[200, disturbance_factor_meas], [300, 1/disturbance_factor_meas]]], #[400, 1/disturbance_factor_meas], [500, disturbance_factor_meas]]],
     'disturb_noise_coeff': [1, 1], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
@@ -444,6 +479,7 @@ meas_truncated_gaussian_memory = []
 
 measurements = []
 rng = np.random.default_rng(1)
+correlated_noise_interval = list(range(400, 500))
 alternative_noise_interval = list(range(600, 700))
 
 for truth in truths:
@@ -452,7 +488,7 @@ for truth in truths:
         # Disturb the measurement model based on the disturbance modes
         gt_measurement_model = disturbance_measurement_noise(gt_measurement_model, gt_measurement_configs, k)
         trunc_sigma = 0.0
-        if k in alternative_noise_interval:
+        if k in alternative_noise_interval and activate_disturbances:
             measurement = gt_measurement_model.function(state, noise=False)
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
             # v = sample_uniform_noise_from_cov(R_true, rng, spread_factor=(1, 1))
@@ -472,7 +508,19 @@ for truth in truths:
 
             measurement += v
             meas_truncated_gaussian_memory.append(trunc_sigma)
+        elif k in correlated_noise_interval and activate_disturbances:
+            measurement = gt_measurement_model.function(state, noise=False)
 
+            R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
+
+            v = sample_correlated_gaussian_noise_from_cov(
+                R_true,
+                rng,
+                rho=0.9999,
+            )
+
+            measurement = measurement + v
+            meas_truncated_gaussian_memory.append(trunc_sigma)
         else:
             measurement = gt_measurement_model.function(state, noise=True)
             meas_truncated_gaussian_memory.append(trunc_sigma)
@@ -600,8 +648,10 @@ def calculate_lt_evidence(W: int, alpha=0.99):
 
 # eSLIM++ LTST Buffer
 SHORT_WINDOW_SIZE = 35
+SHORT_WINDOW_SIZE_RADIAL = 20
 W = 7
 DISCOUNT = 0.99
+DISCOUNT_RADIAL = 0.9958
 
 import json
 with open("entropy_threshold.json", 'r') as f:
@@ -614,8 +664,10 @@ with open("adjusted_opinion_threshold_smoothed.json", 'r') as f:
 griebel_threshold = calc_threshold_n_diff(W, SHORT_WINDOW_SIZE, 0.1)
 print("Griebels threshold:", griebel_threshold)
 # THRESHOLD = calibrate_entropy_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.01)
-THRESHOLD = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, 0.99)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
+THRESHOLD = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, DISCOUNT)}, 0.01"] #calibrate_opinion_threshold(W, calculate_lt_evidence(W, DISCOUNT), 0.005)
+THRESHOLD_RADIAL = opinion_thresholds[f"{W}, {calculate_lt_evidence(W, DISCOUNT_RADIAL)}, 0.01"]
 print("Threshold for LTST:", THRESHOLD)
+print("Threshold for RADIAL:", THRESHOLD_RADIAL)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
 # FUSION_TYPE = sl.FusionType.WEIGHTED
@@ -861,6 +913,21 @@ griebel_inno = GriebelInnovationTest(
 griebel_inno_window = []
 griebel_p_ok_history = []
 
+if not use_ct_model:
+    stationary = compute_stationary_kf_quantities(
+        transition_model=transition_model,
+        measurement_model=stationary_measurement_model,
+        prior=prior
+    )
+
+    F_h2 = stationary["F"]
+    Q_h2 = stationary["Q"]
+    H_h2 = stationary["H"]
+    R_h2 = stationary["R"]
+    m_h2 = H_h2.shape[0]
+    K_inf = stationary["K_inf"]
+    print("Stationary Kalman Gain:\n", K_inf)
+
 for i, measurement in enumerate(measurements):
     prediction: GaussianStatePrediction = predictor.predict(prior, timestamp=measurement.timestamp)
     hypothesis = SingleHypothesis(prediction, measurement)  # Group a prediction and measurement
@@ -911,7 +978,7 @@ for i, measurement in enumerate(measurements):
     griebel_dist = eval(f"sl.DirichletDistribution{2}d").from_evidences(griebel_evidence)
     griebel_op = griebel_dist.as_opinion()
     # griebel_op = sl.Opinion(griebel_inno_belief, griebel_inno_disbelief)
-    # griebel_op.prior_belief_masses =  [0.95, 0.05]
+    griebel_op.prior_belief_masses =  [0.95, 0.05]
     griebel_inno_window.append(griebel_op)
     if len(griebel_inno_window) > griebel_inno.window_length:
         griebel_inno_window.pop(0)
@@ -1165,7 +1232,7 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     buffered_ops.append(op_buffer)
 
     th_dc[idx] = calc_threshold_n_diff(W, sum(op_buffer.as_dirichlet().evidences), 0.1)
-    # print("Sum of Evidence:", sum(op_buffer.as_dirichlet().evidences))
+    print("Sum of Evidence:", sum(op_buffer.as_dirichlet().evidences))
     sums_of_evidence.append(int(sum(op_buffer.as_dirichlet().evidences)))
     evidences.append(list(op_buffer.as_dirichlet().evidences))
 
@@ -1300,7 +1367,7 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     dc_adj_l1.append(dc_l1_norm)
 
     op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
-    # op_l1.prior_belief_masses = [0.95, 0.05]
+    op_l1.prior_belief_masses = [0.99, 0.01]
     # L2
     d2_max = np.sqrt(1.0 - 1.0 / W)
     dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
@@ -1328,7 +1395,7 @@ p_ok_comp = []
 p_ok_overall = []
 
 
-prior_ok = float(np.sqrt(0.5))
+prior_ok = 0.99 # float(np.sqrt(0.5))
 
 for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     opx, opy = ops
@@ -1343,7 +1410,7 @@ for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     component_binomial.append(component_op)
     # print(i, "Compon:", component_op)
     # print(i, "Radial:", global_op_history[i])
-    overall_op = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, [component_op, global_op_history[i]])
+    overall_op = component_op.multiply(global_op_history[i])  #sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, [component_op, global_op_history[i]])
     overall_binomial.append(overall_op)
     # print(i, "Overall:", overall_op)
 
@@ -1398,6 +1465,7 @@ plt.plot(p_ok_comp, label="P_OK Comp Fused")
 plt.plot(p_ok_overall, label="P_OK Overall")
 plt.plot([overall_binomial[i].uncertainty() for i in range(len(overall_binomial))], label="P_OK Uncertainty")
 plt.plot([fused_2_op_obj_history[i].uncertainty() for i in range(len(fused_2_op_obj_history))], label="Griebel Uncertainty")
+plt.plot([component_binomial[i].uncertainty() for i in range(len(component_binomial))], label="Comp Uncertainty")
 # plt.plot(p_ok_exp, label="P_OK Exp")
 plt.legend()
 plt.grid()
@@ -1554,6 +1622,8 @@ plt.figure()
 # plt.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.01"] for s in sums_of_evidence_y], label = "Th y", color="orange", alpha=0.5)
 plt.plot(p_ok_x, label="P_OK Comp X")
 plt.plot(p_ok_y, label="P_OK Comp Y")
+plt.plot([component_x_binomial[i].uncertainty() for i in range(len(component_x_binomial))], label="u_comp X")
+plt.plot([component_y_binomial[i].uncertainty() for i in range(len(component_y_binomial))], label="u_comp Y")
 plt.legend()
 plt.grid()
 plt.title("P_OK Local")

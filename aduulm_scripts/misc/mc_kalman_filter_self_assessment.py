@@ -97,7 +97,7 @@ class ExperimentConfig:
     turn_rate_deg_s: float = -20.0
 
     # GT process-noise disturbance, as in V6
-    disturbance_factor_process: float = 50.0
+    disturbance_factor_process: float = 25.0
     process_disturb_start: int = 1000
     process_disturb_end: int = 1200
     disturb_x: bool = False
@@ -107,15 +107,15 @@ class ExperimentConfig:
     disturbance_factor_meas: float = 4.0
     meas_disturb_k1: int = 200
     meas_disturb_k2: int = 300
-    # meas_disturb_k3: int = 400
-    # meas_disturb_k4: int = 500
+    meas_disturb_k3: int = 400
+    meas_disturb_k4: int = 500
     # V6 uses [1,1]; both dimensions are affected
     disturb_noise_coeff_x: int = 1
     disturb_noise_coeff_y: int = 1
 
     # Truncated-Gaussian measurement-noise disturbance, as in V6
-    correlated_start: int = 400
-    correlated_end: int = 500
+    correlated_start: int = -1
+    correlated_end: int = -1
     truncated_start: int = 600
     truncated_end: int = 700
     truncation_sigma: float = 1.0
@@ -430,8 +430,8 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
         "parameters": [[
             [config.meas_disturb_k1, disturbance_factor_meas],
             [config.meas_disturb_k2, 1.0 / disturbance_factor_meas],
-            # [config.meas_disturb_k3, 1.0 / disturbance_factor_meas],
-            # [config.meas_disturb_k4, disturbance_factor_meas],
+            [config.meas_disturb_k3, 1.0 / disturbance_factor_meas],
+            [config.meas_disturb_k4, disturbance_factor_meas],
         ]],
         "disturb_noise_coeff": [config.disturb_noise_coeff_x, config.disturb_noise_coeff_y],
     }
@@ -446,7 +446,7 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
 
         trunc_sigma = 0.0
         correlation_activated = 0
-        if config.truncated_start <= k < config.truncated_end:
+        if config.truncated_start <= k < config.truncated_end and config.activate_disturbances:
             measurement = gt_measurement_model.function(state, noise=False)
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
             trunc_sigma = config.truncation_sigma
@@ -455,7 +455,7 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
                 rng,
                 truncation_sigma=trunc_sigma,
             )
-        elif config.correlated_start <= k < config.correlated_end:
+        elif config.correlated_start <= k < config.correlated_end and config.activate_disturbances:
             measurement = gt_measurement_model.function(state, noise=False)
             R_true = np.asarray(gt_measurement_model.noise_covar, dtype=float)
 
@@ -605,7 +605,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         griebel_evidence = np.array([int(griebel_accept), 1 - int(griebel_accept)])
         griebel_dist = eval("sl.DirichletDistribution2d").from_evidences(griebel_evidence)
         griebel_op = griebel_dist.as_opinion()
-        griebel_op.prior_belief_masses = config.griebel_priors
+        griebel_op.prior_belief_masses = list(config.griebel_priors)
         griebel_inno_window.append(griebel_op)
         if len(griebel_inno_window) > config.griebel_window_length:
             griebel_inno_window.pop(0)
@@ -695,7 +695,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         opx_bin = multinomial_opinion_to_binomial_ok_opinion(opx, W, prior_ok=prior_comp)
         opy_bin = multinomial_opinion_to_binomial_ok_opinion(opy, W, prior_ok=prior_comp)
         component_op = opx_bin.multiply(opy_bin)
-        overall_op = sl.Fusion.fuse_opinions(sl.FusionType.AVERAGE, [component_op, opr])
+        overall_op = sl.Fusion.fuse_opinions(sl.FusionType.WEIGHTED, [component_op, opr])
 
         p_ok_x.append(opx_bin.getProjection()[0])
         p_ok_y.append(opy_bin.getProjection()[0])
@@ -842,8 +842,8 @@ def plot_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
     def add_disturbance_spans(ax):
         disturbance_spans = [
             (config.meas_disturb_k1, config.meas_disturb_k2, "#fee5e5", "measurement noise x4"),
-            # (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", "measurement noise x1/4"),
-            (config.correlated_start, config.correlated_end, "#fcb7b7", "correlated Gaussian"),
+            (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", "measurement noise x1/4"),
+            # (config.correlated_start, config.correlated_end, "#fcb7b7", "correlated Gaussian"),
             (config.truncated_start, config.truncated_end, "#fc8d8d", "truncated Gaussian"),
             (config.turn_start, config.turn_end, "#ef3b2c", "turn / model mismatch"),
             (config.process_disturb_start, config.process_disturb_end, "#b30000", "process noise disturbance"),
