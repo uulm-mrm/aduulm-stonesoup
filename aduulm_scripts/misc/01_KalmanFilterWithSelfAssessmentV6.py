@@ -615,7 +615,7 @@ selfassessor_measures_history = []
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
 nis_settings = {
-    "window_length": 35,  # window size of the NIS averaging
+    "window_length": 1,  # window size of the NIS averaging
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
@@ -917,7 +917,7 @@ griebel_inno = GriebelInnovationTest(
     dim_meas=measurement_model.ndim_meas,
     alpha=0.05,
     window_length=35,
-    two_sided=False,
+    two_sided=True,
     mapping=measurement_model.mapping,
 )
 griebel_inno_window = []
@@ -1242,7 +1242,7 @@ for idx, op_obs in tqdm.tqdm(enumerate(ops_per_timestep), total=len(ops_per_time
     buffered_ops.append(op_buffer)
 
     th_dc[idx] = calc_threshold_n_diff(W, sum(op_buffer.as_dirichlet().evidences), 0.1)
-    print("Sum of Evidence:", sum(op_buffer.as_dirichlet().evidences))
+    # print("Sum of Evidence:", sum(op_buffer.as_dirichlet().evidences))
     sums_of_evidence.append(int(sum(op_buffer.as_dirichlet().evidences)))
     evidences.append(list(op_buffer.as_dirichlet().evidences))
 

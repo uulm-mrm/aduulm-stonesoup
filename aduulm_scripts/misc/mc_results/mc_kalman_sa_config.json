@@ -44,7 +44,7 @@
   "alpha_threshold_dc": 0.01,
   "griebel_alpha": 0.05,
   "griebel_window_length": 35,
-  "griebel_two_sided": false,
+  "griebel_two_sided": true,
   "griebel_type_compar": "dimensional",
   "griebel_priors": [
     0.95,

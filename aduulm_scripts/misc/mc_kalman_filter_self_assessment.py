@@ -81,8 +81,8 @@ class ExperimentConfig:
     # Time / model
     num_steps: int = 1300
     dt_seconds: float = 0.1
-    use_ct_model: bool = False
-    activate_disturbances: bool = True
+    use_ct_model: bool = True
+    activate_disturbances: bool = False
 
     # Nominal model parameters, as in V6
     q_x: float = 0.25
@@ -138,7 +138,7 @@ class ExperimentConfig:
     alpha_threshold_dc: float = 0.01
     griebel_alpha: float = 0.05
     griebel_window_length: int = 35
-    griebel_two_sided: bool = False
+    griebel_two_sided: bool = True
     griebel_type_compar: str = "dimensional"  # V6 default is dimensional
     griebel_priors: tuple = (0.95, 0.05)
 
@@ -590,6 +590,8 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
     # NIS baseline
     nis = NIS(window_length=config.short_window_size, alpha=config.alpha_threshold_dc, dim=m)
     nis_score_history = []
+    nis_upper_band_history = []
+    nis_lower_band_history = []
 
     # Griebel binomial innovation test
     griebel_inno = GriebelInnovationTest(
@@ -649,10 +651,11 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         selfassessor_measures_history.append(selfassessor.get_sas_measures())
         nis_result = nis.assess(z_p, S_p, z)
         # Keep first element if NIS returns vector/list, otherwise scalar.
-        try:
-            nis_score_history.append(float(np.ravel(nis_result)[0]))
-        except Exception:
-            nis_score_history.append(np.nan)
+
+        nis_score_history.append(nis_result[0])
+        nis_lower_band_history.append(nis_result[1][0])
+        nis_upper_band_history.append(nis_result[1][1])
+
 
         # Innovation quantities
         delta = (z - z_p).reshape(-1, 1)
@@ -736,6 +739,10 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
 
     # Radial binomial opinions
     global_op_history = [multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.5) for op in buffered_ops]
+    W = config.W
+    op_ref = eval(f"sl.Opinion{W}d")(*([1/W]*W))
+    dc_josang_history = [op.degree_of_conflict(op_ref) for op in buffered_ops]
+    dc_norm_history = [dc_j / ((1 - op.uncertainty()) * (1 - 1/W) ) for op, dc_j in zip(buffered_ops, dc_josang_history)]
 
     # Component and overall binomial opinions
     prior_comp = float(np.sqrt(0.5))
@@ -785,7 +792,11 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         "griebel_multinomial_dc": selfassessor_measures_history[:, 0],
         "griebel_multinomial_uncertainty": selfassessor_measures_history[:, 1],
         "griebel_multinomial_threshold": selfassessor_measures_history[:, 2],
+        "dc_josang_history": np.asarray(dc_josang_history, dtype=float),
+        "dc_norm_history": np.asarray(dc_norm_history, dtype=float),
         "nis_score": np.asarray(nis_score_history, dtype=float),
+        "nis_lower_band": np.asarray(nis_lower_band_history, dtype=float),
+        "nis_upper_band": np.asarray(nis_upper_band_history, dtype=float),
         "dist_truncated_gaussian": np.asarray(trunc_memory[: len(p_ok_overall)], dtype=float),
         "dist_turn": np.pad(model_indices, (0, max(0, len(p_ok_overall) - len(model_indices))), constant_values=0)[: len(p_ok_overall)].astype(float),
     }
@@ -856,6 +867,11 @@ def save_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
         "griebel_multinomial_dc",
         "griebel_multinomial_uncertainty",
         "griebel_multinomial_threshold",
+        "dc_josang_history",
+        "dc_norm_history",
+        "nis_score",
+        "nis_lower_band",
+        "nis_upper_band",
     ]
     T = len(mc_results[core_keys[0]]["mean"])
     with csv_path.open("w", newline="") as f:
@@ -1011,7 +1027,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Monte-Carlo KF self-assessment experiment.")
     parser.add_argument("--n-mc", type=int, default=100, help="Number of Monte Carlo runs.")
     parser.add_argument("--seed0", type=int, default=0, help="First random seed.")
-    parser.add_argument("--output-dir", type=str, default="mc_results", help="Output directory.")
+    parser.add_argument("--output-dir", type=str, default="mc_results_nominal", help="Output directory.")
     parser.add_argument("--output-prefix", type=str, default="mc_kalman_sa", help="Output filename prefix.")
     parser.add_argument("--no-plot", action="store_true", help="Do not generate static plots.")
     parser.add_argument("--no-quantile-band", action="store_true", help="Disable q05-q95 fill_between bands in plots.")
