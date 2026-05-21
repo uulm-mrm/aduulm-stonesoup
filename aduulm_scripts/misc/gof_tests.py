@@ -773,10 +773,7 @@ def run_table1_like_evaluation(
 
     return tau, results
 
-W = 50
-n = 200
-alpha = 0.01
-prior_ok = 0.5
+
 import json
 import csv
 from pathlib import Path
@@ -851,14 +848,20 @@ def save_results_table(results, output_dir="results", filename_prefix="gof_resul
         "tex": str(tex_path),
     }
 
+# PARAMETERS
+W = 20
+n = 200
+alpha = 0.05
+prior_ok = 0.5
+
 tau, results = run_table1_like_evaluation(
     densities=DENSITIES,
-    W=50,
-    n=200,
-    alpha=0.05,
+    W=W,
+    n=n,
+    alpha=alpha,
     N_calib=100000,
     N_power=100000,
-    prior_ok=0.5,
+    prior_ok=prior_ok,
     seed=42,
     show_progress=True,
 )
@@ -884,12 +887,12 @@ plot_fig1_like_densities(n=n, bins=W, seed=1)
 
 tau, results = run_fig3_like_evaluation(
     samplers=FIG3_SAMPLERS,
-    W=50,
-    n=200,
-    alpha=0.05,
+    W=W,
+    n=n,
+    alpha=alpha,
     N_calib=100000,
     N_power=100000,
-    prior_ok=0.5,
+    prior_ok=prior_ok,
     seed=42,
     show_progress=True,
 )

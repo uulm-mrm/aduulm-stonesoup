@@ -329,7 +329,7 @@ gt_right_turn_model = KnownTurnRate([q_x, q_y], turn_rate)
 
 # Turn interval
 turn_start = 800
-turn_end = 875   # 60 steps at dt=0.1s -> 6 seconds
+turn_end = 900   # 60 steps at dt=0.1s -> 6 seconds
 
 # ------------------------------------------------------------------
 # Initial ground truth
@@ -480,8 +480,8 @@ disturbance_factor_meas = 2 if activate_disturbances else 1 #4
 gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
-    'disturbance_mode': ['jump'],
-    'parameters': [[[200, disturbance_factor_meas, [1, 0]], [300, 1/disturbance_factor_meas, [1, 0]], [400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]]],
+    'disturbance_mode': ['jump', 'outliers'],
+    'parameters': [[[200, disturbance_factor_meas, [1, 0]], [300, 1/disturbance_factor_meas, [1, 0]], [400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]], [[100, 150, 5, 5]]], #[400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]]],
     # 'disturb_noise_coeff': [[1, 0], [1, 1]], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
@@ -615,7 +615,7 @@ selfassessor_measures_history = []
 from stonesoup.selfassessor.nis import NIS
 # NIS settings
 nis_settings = {
-    "window_length": 1,  # window size of the NIS averaging
+    "window_length": 35,  # window size of the NIS averaging
     "alpha": 0.01,  # significance level
     "dim_meas": measurement_model.ndim_meas,
 }
@@ -653,7 +653,7 @@ def calibrate_opinion_threshold(W, n_s, alpha=0.05, N=100000):
     return np.quantile(vals, 1 - alpha)
 
 def calculate_lt_evidence(W: int, alpha=0.99):
-    return int((-(W - 1) + np.sqrt((W-1)**2 + ((4 * W) / (1 - alpha)))) / (2))
+    return int((-(W - 1) + np.sqrt((W-1)**2 + ((4 * W) / (1 - alpha + 1e-12)))) / (2))
 
 
 # eSLIM++ LTST Buffer
@@ -695,6 +695,27 @@ ltst_component_y = eval(f"sl.LongShortTermMemory{W}d")(
 )
 component_x_buffered = []
 component_y_buffered = []
+
+ltst_whiteness_x = eval(f"sl.LongShortTermMemory{W}d")(
+    SHORT_WINDOW_SIZE,
+    THRESHOLD,
+    DISCOUNT,
+    FUSION_TYPE,
+    HANDLE_ST_CONFLICT,
+    AVG_DC_CONFLICT_HANDLING
+)
+
+ltst_whiteness_y = eval(f"sl.LongShortTermMemory{W}d")(
+    SHORT_WINDOW_SIZE,
+    THRESHOLD,
+    DISCOUNT,
+    FUSION_TYPE,
+    HANDLE_ST_CONFLICT,
+    AVG_DC_CONFLICT_HANDLING
+)
+
+whiteness_x_buffered = []
+whiteness_y_buffered = []
 
 ops = []
 ops_per_timestep = []
@@ -825,6 +846,87 @@ def multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.5, eps=1e-12):
     op_ok.prior_belief_masses = [prior_ok, 1.0 - prior_ok]
     return op_ok
 
+def bar_shalom_realtime_whiteness_pit(
+    innovation_buffer,
+    lag=1,
+    eps=1e-12,
+):
+    """
+    Bar-Shalom real-time single-run whiteness statistic,
+    mapped via PIT to Uniform(0,1).
+
+    For component ell and lag j:
+
+        rho_ell(j) =
+            sum_k nu_ell(k) nu_ell(k+j)
+            /
+            sqrt(
+                sum_k nu_ell(k)^2
+                *
+                sum_k nu_ell(k+j)^2
+            )
+
+    Under H0:
+
+        rho_ell(j) ~ N(0, 1/K)
+
+    Therefore:
+
+        u_ell(j) = Phi(rho_ell(j); 0, 1/K)
+                 = Phi(sqrt(K) * rho_ell(j))
+
+    is approximately Uniform(0,1).
+    """
+    innovation_buffer = np.asarray(innovation_buffer, dtype=float)
+
+    if innovation_buffer.ndim != 2:
+        raise ValueError("innovation_buffer must have shape (K + lag, m).")
+
+    if lag <= 0:
+        raise ValueError("lag must be positive.")
+
+    L, m = innovation_buffer.shape
+
+    if L <= lag:
+        return {
+            "rho": np.full(m, np.nan),
+            "z": np.full(m, np.nan),
+            "u": np.full(m, np.nan),
+            "K": 0,
+        }
+
+    # Number of products
+    K = L - lag
+
+    # nu(k), k = 1,...,K
+    x0 = innovation_buffer[:K, :]
+
+    # nu(k+j), k = 1,...,K
+    xj = innovation_buffer[lag:lag + K, :]
+
+    numerator = np.sum(x0 * xj, axis=0)
+
+    denominator = (
+        np.sqrt(np.sum(x0**2, axis=0))
+        * np.sqrt(np.sum(xj**2, axis=0))
+        + eps
+    )
+
+    rho = numerator / denominator
+
+    # Standardized statistic under H0
+    z = np.sqrt(K) * rho
+
+    # PIT under z ~ N(0,1)
+    u = norm.cdf(z)
+    u = np.clip(u, 0.0, 1.0)
+
+    return {
+        "rho": rho,
+        "z": z,
+        "u": u,
+        "K": K,
+    }
 # %%
 from stonesoup.types.hypothesis import SingleHypothesis
 
@@ -911,6 +1013,28 @@ from collections import deque
 # Per-timestep opinions for new channels
 ops_component_x = []
 ops_component_y = []
+
+# ------------------------------------------------------------------
+# Bar-Shalom Real-Time Single-Run Whiteness Channel
+# ------------------------------------------------------------------
+WHITENESS_K = 35       # number of products K in Eq. (5.4.2-15)
+WHITENESS_LAG = 1      # j = 1
+
+# Need K + lag samples to compute K products.
+innovation_barshalom_buffer = []
+
+ops_whiteness_x = []
+ops_whiteness_y = []
+
+whiteness_rho_x_history = []
+whiteness_rho_y_history = []
+whiteness_z_x_history = []
+whiteness_z_y_history = []
+whiteness_p_x_history = []
+whiteness_p_y_history = []
+whiteness_accept_x_history = []
+whiteness_accept_y_history = []
+whiteness_bound_history = []
 
 from griebels_methods.binomial_hypothesis import GriebelBinomialOpinion, GriebelInnovationTest
 griebel_inno = GriebelInnovationTest(
@@ -1039,6 +1163,55 @@ for i, measurement in enumerate(measurements):
     nu_white_history.append(nu_white.copy())
     if len(nu_white_history) > max_buffer:
         nu_white_history.pop(0)
+    # ------------------------------------------------------------------
+    # Bar-Shalom real-time single-run whiteness test
+    #
+    # Uses the non-whitened innovation nu_k = z_k - z_hat_{k|k-1},
+    # not the whitened innovation.
+    # ------------------------------------------------------------------
+    innovation_barshalom_buffer.append(delta.flatten().copy())
+
+    max_white_buffer_len = WHITENESS_K + WHITENESS_LAG
+
+    if len(innovation_barshalom_buffer) > max_white_buffer_len:
+        innovation_barshalom_buffer.pop(0)
+
+    if len(innovation_barshalom_buffer) >= max_white_buffer_len:
+        white_res = bar_shalom_realtime_whiteness_pit(
+            np.asarray(innovation_barshalom_buffer),
+            lag=WHITENESS_LAG,
+        )
+
+        rho_white = white_res["rho"]
+        z_white = white_res["z"]
+        u_white = white_res["u"]
+
+        u_white_x = float(u_white[0])
+        u_white_y = float(u_white[1])
+
+        op_white_x = scalar_u_to_opinion(u_white_x, W)
+        op_white_y = scalar_u_to_opinion(u_white_y, W)
+        whiteness_p_x_history.append(u_white_x)
+        whiteness_p_y_history.append(u_white_y)
+
+        whiteness_rho_x_history.append(float(rho_white[0]))
+        whiteness_rho_y_history.append(float(rho_white[1]))
+        whiteness_z_x_history.append(float(z_white[0]))
+        whiteness_z_y_history.append(float(z_white[1]))
+
+    else:
+        op_white_x = scalar_u_to_opinion(-1, W)
+        op_white_y = scalar_u_to_opinion(-1, W)
+
+        whiteness_rho_x_history.append(np.nan)
+        whiteness_rho_y_history.append(np.nan)
+        whiteness_z_x_history.append(np.nan)
+        whiteness_z_y_history.append(np.nan)
+        whiteness_p_x_history.append(np.nan)
+        whiteness_p_y_history.append(np.nan)
+
+    ops_whiteness_x.append(op_white_x)
+    ops_whiteness_y.append(op_white_y)
 
     # # -----------------------------
     # # Whitening
@@ -1186,6 +1359,52 @@ for i, measurement in enumerate(measurements):
     uncertainty_history.append(kl_opinion.uncertainty())
 
 
+def compute_position_error_single_run(track, truth, mapping=(0, 2)):
+    truth_by_time = {
+        state.timestamp: state
+        for state in truth
+    }
+
+    errors = []
+    timestamps = []
+
+    for estimate in track:
+        gt_state = truth_by_time.get(estimate.timestamp)
+        if gt_state is None:
+            continue
+
+        x_est = np.asarray(estimate.state_vector, dtype=float).reshape(-1)
+        x_gt = np.asarray(gt_state.state_vector, dtype=float).reshape(-1)
+
+        e = x_est[list(mapping)] - x_gt[list(mapping)]
+
+        errors.append(e)
+        timestamps.append(estimate.timestamp)
+
+    errors = np.asarray(errors)
+
+    pos_error = np.sqrt(np.sum(errors**2, axis=1))
+
+    return {
+        "timestamps": timestamps,
+        "errors_xy": errors,
+        "position_error": pos_error,
+    }
+
+
+rmse_single = compute_position_error_single_run(
+    track=track,
+    truth=truth,
+    mapping=(0, 2),
+)
+
+plt.figure()
+plt.plot(rmse_single["position_error"], label=r"$\| \hat p_k - p_k \|_2$")
+plt.grid()
+plt.legend()
+plt.xlabel("time step")
+plt.ylabel("position error [m]")
+plt.title("Single-run position error")
 # %%
 import tqdm
 ops = ops_per_timestep
@@ -1329,12 +1548,19 @@ for opx, opy in zip(
     sums_of_evidence_x.append(int(sum(ltst_component_x.get_opinion().as_dirichlet().evidences)))
     sums_of_evidence_y.append(int(sum(ltst_component_y.get_opinion().as_dirichlet().evidences)))
 
+for opwx, opwy in zip(ops_whiteness_x, ops_whiteness_y):
+    ltst_whiteness_x.add(opwx)
+    ltst_whiteness_y.add(opwy)
+
+    whiteness_x_buffered.append(ltst_whiteness_x.get_opinion())
+    whiteness_y_buffered.append(ltst_whiteness_y.get_opinion())
+
 # dc_white_x = [white_x.degree_of_conflict(op_ref) for white_x in whiteness_x_buffered]
 # dc_white_y = [white_y.degree_of_conflict(op_ref) for white_y in whiteness_y_buffered]
 dc_comp_x = [comp_x.degree_of_conflict(op_ref) for comp_x in component_x_buffered]
 dc_comp_y = [comp_y.degree_of_conflict(op_ref) for comp_y in component_y_buffered]
 component_buffered = []
-whiteness_buffered = []
+
 
 for opx, opy in zip(component_x_buffered, component_y_buffered):
     fused_comp = sl.Fusion.fuse_opinions(sl.FusionType.BELIEF_CONSTRAINT, [opx, opy])
@@ -1377,7 +1603,7 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     dc_adj_l1.append(dc_l1_norm)
 
     op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
-    # op_l1.prior_belief_masses = [0.99, 0.01]
+    op_l1.prior_belief_masses = [0.99, 0.01]
     # L2
     d2_max = np.sqrt(1.0 - 1.0 / W)
     dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
@@ -1404,8 +1630,16 @@ p_ok_y = []
 p_ok_comp = []
 p_ok_overall = []
 
+whiteness_x_binomial = []
+whiteness_y_binomial = []
+whiteness_binomial = []
 
-prior_ok = float(np.sqrt(0.5))
+p_ok_white_x = []
+p_ok_white_y = []
+p_ok_whiteness = []
+u_whiteness = []
+
+prior_ok = 0.99 #float(np.sqrt(0.5))
 
 for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     opx, opy = ops
@@ -1429,6 +1663,33 @@ for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     p_ok_y.append(opy_bin.getProjection()[0]) #opy_bin.belief() + prior_ok * opy_bin.uncertainty())
     p_ok_comp.append(component_binomial[-1].getProjection()[0])
     p_ok_overall.append(overall_op.getProjection()[0])
+
+prior_white = float(np.sqrt(0.5))
+
+for opwx, opwy in zip(whiteness_x_buffered, whiteness_y_buffered):
+    opwx_bin = multinomial_opinion_to_binomial_ok_opinion(
+        opwx,
+        W,
+        prior_ok=prior_white,
+    )
+
+    opwy_bin = multinomial_opinion_to_binomial_ok_opinion(
+        opwy,
+        W,
+        prior_ok=prior_white,
+    )
+
+    # H_white = H_white_x AND H_white_y
+    white_op = opwx_bin.multiply(opwy_bin)
+
+    whiteness_x_binomial.append(opwx_bin)
+    whiteness_y_binomial.append(opwy_bin)
+    whiteness_binomial.append(white_op)
+
+    p_ok_white_x.append(opwx_bin.getProjection()[0])
+    p_ok_white_y.append(opwy_bin.getProjection()[0])
+    p_ok_whiteness.append(white_op.getProjection()[0])
+    u_whiteness.append(white_op.uncertainty())
 
 # for i, _ in enumerate(dc_st_lt):
 #     assert np.isclose(dc_ltst[i], dc_st_lt[i]), f"{i}, {dc_ltst[i]}, {dc_st_lt[i]}"
@@ -1464,6 +1725,7 @@ plt.legend()
 plt.grid()
 plt.title("Disturbances")
 
+# print(p_ok_whiteness)
 plt.figure()
 plt.plot(griebel_p_ok_history, label="Griebel Innovation SA")
 # plt.plot(griebel_bias.score_history, label="Griebel Bias SA")
@@ -1474,6 +1736,7 @@ plt.plot([global_op_history[i].getProjection()[0] for i in range(len(global_op_h
 # plt.plot(p_ok_y, label="P_OK Comp Y")
 plt.plot(p_ok_comp, label="P_OK Comp Fused")
 plt.plot(p_ok_overall, label="P_OK Overall")
+# plt.plot(p_ok_whiteness, label="P_OK Whiteness")
 plt.plot([overall_binomial[i].uncertainty() for i in range(len(overall_binomial))], label="P_OK Uncertainty")
 plt.plot([fused_2_op_obj_history[i].uncertainty() for i in range(len(fused_2_op_obj_history))], label="Griebel Uncertainty")
 plt.plot([component_binomial[i].uncertainty() for i in range(len(component_binomial))], label="Comp Uncertainty")
@@ -1481,6 +1744,38 @@ plt.plot([component_binomial[i].uncertainty() for i in range(len(component_binom
 plt.legend()
 plt.grid()
 plt.title("Griebel Baseline vs Own Method")
+
+# plt.figure()
+# plt.plot(p_ok_white_x, label=r"$P_{OK,\mathrm{white},x}$")
+# plt.plot(p_ok_white_y, label=r"$P_{OK,\mathrm{white},y}$")
+# plt.plot(p_ok_whiteness, label=r"$P_{OK,\mathrm{white}}$")
+# plt.plot(u_whiteness, label=r"$u_{\mathrm{white}}$")
+# plt.grid()
+# plt.legend()
+# plt.title("Bar-Shalom Real-Time Whiteness Channel")
+#
+# plt.figure()
+# plt.plot(whiteness_p_x_history, label=r"$u_{\mathrm{white},x}$")
+# plt.plot(whiteness_p_y_history, label=r"$u_{\mathrm{white},y}$")
+# plt.grid()
+# plt.legend()
+# plt.title("Bar-Shalom Whiteness PIT values")
+#
+# plt.figure()
+# plt.plot(whiteness_z_x_history, label=r"$z_{\mathrm{white},x}$")
+# plt.plot(whiteness_z_y_history, label=r"$z_{\mathrm{white},y}$")
+# plt.axhline(0.0, linestyle="--")
+# plt.grid()
+# plt.legend()
+# plt.title(r"Standardized Bar-Shalom statistic $z=\sqrt{K}\rho$")
+#
+# plt.figure()
+# plt.plot(whiteness_rho_x_history, label="rho_x")
+# plt.plot(whiteness_rho_y_history, label="rho_y")
+# plt.axhline(0.0, linestyle="--")
+# plt.grid()
+# plt.legend()
+# plt.title(r"Standardized Bar-Shalom statistic rho values")
 
 # plt.figure()
 # plt.plot(list(np.linspace(0, 0.5, 500)), list(map(lambda x: calc_threshold_n_diff(5, 58.62, x), list(np.linspace(0, 0.5, 500)))), label='th')
@@ -1592,24 +1887,24 @@ plt.title("DCs")
 # plt.grid()
 # plt.title("Signal")
 
-fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
-# --- Radial ---
-ax1.plot(dc_ref, label="DC Radial")
-ax1.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence],
-         label="Th Radial")
-ax1.set_title("Radial")
-ax1.grid()
-ax1.legend()
-# --- Comp ---
-ax2.plot(dc_comp, label="DC Comp")
-ax2.plot([opinion_thresholds[f"{W}, {min(ceil(s/m), 150)}, 0.005"] for s in sums_of_evidence_comp],
-         label="Th Comp")
-ax2.set_title("Comp")
-ax2.grid()
-ax2.legend()
-# Gemeinsamer Titel
-fig.suptitle("DC Global")
-plt.tight_layout()
+# fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+# # --- Radial ---
+# ax1.plot(dc_ref, label="DC Radial")
+# ax1.plot([opinion_thresholds[f"{W}, {min(s, 150)}, 0.005"] for s in sums_of_evidence],
+#          label="Th Radial")
+# ax1.set_title("Radial")
+# ax1.grid()
+# ax1.legend()
+# # --- Comp ---
+# ax2.plot(dc_comp, label="DC Comp")
+# ax2.plot([opinion_thresholds[f"{W}, {min(ceil(s/m), 150)}, 0.005"] for s in sums_of_evidence_comp],
+#          label="Th Comp")
+# ax2.set_title("Comp")
+# ax2.grid()
+# ax2.legend()
+# # Gemeinsamer Titel
+# fig.suptitle("DC Global")
+# plt.tight_layout()
 
 # print(calculate_lt_evidence(W, DISCOUNT)+SHORT_WINDOW_SIZE)
 # plt.figure()

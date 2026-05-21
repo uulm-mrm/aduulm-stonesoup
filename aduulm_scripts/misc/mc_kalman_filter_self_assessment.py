@@ -79,10 +79,10 @@ class ExperimentConfig:
     seed0: int = 0
 
     # Time / model
-    num_steps: int = 1300
+    num_steps: int = 1400
     dt_seconds: float = 0.1
-    use_ct_model: bool = True
-    activate_disturbances: bool = False
+    use_ct_model: bool = False
+    activate_disturbances: bool = True
 
     # Nominal model parameters, as in V6
     q_x: float = 0.25
@@ -92,23 +92,25 @@ class ExperimentConfig:
     meas_var_y: float = 1.0
 
     # Motion-model mismatch disturbance
-    turn_start: int = 800
-    turn_end: int = 875
+    turn_start: int = 900
+    turn_end: int = 1000
     turn_rate_deg_s: float = -20.0
 
     # GT process-noise disturbance, as in V6
     disturbance_factor_process: float = 32
-    process_disturb_start: int = 1000
-    process_disturb_end: int = 1200
+    process_disturb_start: int = 1100
+    process_disturb_end: int = 1300
     disturb_x: bool = True
     disturb_y: bool = False
 
     # Measurement covariance disturbance, as in V6
     disturbance_factor_meas: float = 2.0
-    meas_disturb_k1: int = 200
-    meas_disturb_k2: int = 300
-    meas_disturb_k3: int = 400
-    meas_disturb_k4: int = 500
+    meas_disturb_k1: int = 300
+    meas_disturb_k2: int = 400
+    meas_disturb_k3: int = 500
+    meas_disturb_k4: int = 600
+    meas_disturb_k5: int = 100
+    meas_disturb_k6: int = 200
     # V6 uses [1,1]; both dimensions are affected
     disturb_noise_coeff_x: int = 1
     disturb_noise_coeff_y: int = 1
@@ -118,8 +120,8 @@ class ExperimentConfig:
     correlated_end: int = -1
     diagonal_start: int = -1
     diagonal_end: int = -1
-    truncated_start: int = 600
-    truncated_end: int = 700
+    truncated_start: int = 700
+    truncated_end: int = 800
     truncation_sigma: float = 1.0
 
     # Optional controlled counterexample: directly force whitened innovations
@@ -357,7 +359,7 @@ def multinomial_opinion_to_binomial_ok_opinion(op, W: int, prior_ok: float = 0.5
 
 
 def calculate_lt_evidence(W: int, alpha: float = 0.99) -> int:
-    return int((-(W - 1) + np.sqrt((W - 1) ** 2 + ((4 * W) / (1 - alpha)))) / 2)
+    return int((-(W - 1) + np.sqrt((W - 1) ** 2 + ((4 * W) / (1 - alpha + 1e-12)))) / 2)
 
 
 def load_or_calibrate_threshold(config: ExperimentConfig) -> float:
@@ -374,6 +376,37 @@ def load_or_calibrate_threshold(config: ExperimentConfig) -> float:
 
     return float(calc_threshold_n_diff(config.W, calculate_lt_evidence(config.W, config.discount), config.alpha_threshold_dc))
 
+def compute_position_error_single_run(track, truth, mapping=(0, 2)):
+    truth_by_time = {
+        state.timestamp: state
+        for state in truth
+    }
+
+    errors = []
+    timestamps = []
+
+    for estimate in track:
+        gt_state = truth_by_time.get(estimate.timestamp)
+        if gt_state is None:
+            continue
+
+        x_est = np.asarray(estimate.state_vector, dtype=float).reshape(-1)
+        x_gt = np.asarray(gt_state.state_vector, dtype=float).reshape(-1)
+
+        e = x_est[list(mapping)] - x_gt[list(mapping)]
+
+        errors.append(e)
+        timestamps.append(estimate.timestamp)
+
+    errors = np.asarray(errors)
+
+    pos_error = np.sqrt(np.sum(errors**2, axis=1))
+
+    return {
+        "timestamps": timestamps,
+        "errors_xy": errors,
+        "position_error": pos_error,
+    }
 
 # -----------------------------------------------------------------------------
 # Simulation primitives
@@ -478,13 +511,15 @@ def generate_measurements(config: ExperimentConfig, truth: GroundTruthPath, rng:
 
     disturbance_factor_meas = config.disturbance_factor_meas if config.activate_disturbances else 1.0
     gt_measurement_configs = {
-        "disturbance_mode": ["jump"],
+        "disturbance_mode": ["jump", "outliers"],
         "parameters": [[
             [config.meas_disturb_k1, disturbance_factor_meas, [1, 0]],
             [config.meas_disturb_k2, 1.0 / disturbance_factor_meas, [1, 0]],
             [config.meas_disturb_k3, 1.0 / disturbance_factor_meas, [1, 1]],
             [config.meas_disturb_k4, disturbance_factor_meas, [1, 1]],
-        ]],
+        ],
+            [[config.meas_disturb_k5, config.meas_disturb_k6, 10 if config.activate_disturbances else 1.0, 8 if config.activate_disturbances else 1.0]],
+        ],
         # "disturb_noise_coeff": [config.disturb_noise_coeff_x, config.disturb_noise_coeff_y],
     }
 
@@ -698,7 +733,8 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         ops_per_timestep.append(one_time_dist.as_opinion())
 
     # Build proposed radial LTST opinion history
-    threshold = load_or_calibrate_threshold(config)
+    threshold = load_or_calibrate_threshold(config) if config.discount < 1 else 1
+    # print(threshold)
     ltst = eval(f"sl.LongShortTermMemory{W}d")(
         config.short_window_size,
         threshold,
@@ -738,6 +774,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         component_y_buffered.append(ltst_component_y.get_opinion())
 
     # Radial binomial opinions
+    # global_op_history = [multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.99) for op in buffered_ops]
     global_op_history = [multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.5) for op in buffered_ops]
     W = config.W
     op_ref = eval(f"sl.Opinion{W}d")(*([1/W]*W))
@@ -746,6 +783,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
 
     # Component and overall binomial opinions
     prior_comp = float(np.sqrt(0.5))
+    # prior_comp = 0.99
     p_ok_x = []
     p_ok_y = []
     p_ok_comp = []
@@ -776,6 +814,12 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
 
     selfassessor_measures_history = np.asarray(selfassessor_measures_history, dtype=float)
 
+    rmse_single = compute_position_error_single_run(
+        track=track,
+        truth=truth,
+        mapping=(0, 2),
+    )
+
     return {
         "p_ok_griebel_innovation": np.asarray(griebel_p_ok_history, dtype=float),
         "p_ok_radial": np.asarray(p_ok_radial, dtype=float),
@@ -797,6 +841,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         "nis_score": np.asarray(nis_score_history, dtype=float),
         "nis_lower_band": np.asarray(nis_lower_band_history, dtype=float),
         "nis_upper_band": np.asarray(nis_upper_band_history, dtype=float),
+        "rmse" : np.asarray(rmse_single['position_error'], dtype=float),
         "dist_truncated_gaussian": np.asarray(trunc_memory[: len(p_ok_overall)], dtype=float),
         "dist_turn": np.pad(model_indices, (0, max(0, len(p_ok_overall) - len(model_indices))), constant_values=0)[: len(p_ok_overall)].astype(float),
     }
@@ -872,6 +917,7 @@ def save_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
         "nis_score",
         "nis_lower_band",
         "nis_upper_band",
+        "rmse",
     ]
     T = len(mc_results[core_keys[0]]["mean"])
     with csv_path.open("w", newline="") as f:
@@ -916,6 +962,7 @@ def plot_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
 
     def add_disturbance_spans(ax):
         disturbance_spans = [
+            (config.meas_disturb_k5, config.meas_disturb_k6, "#fee5e5", f"measurement outlier (10, 8)"),
             (config.meas_disturb_k1, config.meas_disturb_k2, "#fee5e5", f"measurement noise x{config.disturbance_factor_meas}"),
             (config.meas_disturb_k3, config.meas_disturb_k4, "#fcb7b7", f"measurement noise x1/{config.disturbance_factor_meas}"),
             # (config.correlated_start, config.correlated_end, "#fcb7b7", "correlated Gaussian"),
@@ -1027,7 +1074,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Monte-Carlo KF self-assessment experiment.")
     parser.add_argument("--n-mc", type=int, default=100, help="Number of Monte Carlo runs.")
     parser.add_argument("--seed0", type=int, default=0, help="First random seed.")
-    parser.add_argument("--output-dir", type=str, default="mc_results_nominal", help="Output directory.")
+    parser.add_argument("--output-dir", type=str, default="mc_results", help="Output directory.")
     parser.add_argument("--output-prefix", type=str, default="mc_kalman_sa", help="Output filename prefix.")
     parser.add_argument("--no-plot", action="store_true", help="Do not generate static plots.")
     parser.add_argument("--no-quantile-band", action="store_true", help="Disable q05-q95 fill_between bands in plots.")
