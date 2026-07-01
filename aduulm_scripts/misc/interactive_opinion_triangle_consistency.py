@@ -567,9 +567,9 @@ app.layout = html.Div(
     children=[
         dcc.Markdown(
             r"""
-## Interaktives Opinion Triangle
+## Interactive Opinion Triangle
 
-Die dargestellte Menge ist
+The displayed set is
 
 $$
 \mathcal{C}_{\eta,\tau_{\mathrm{OK}},a}
@@ -583,7 +583,7 @@ $$
 \right\}.
 $$
 
-Die ternären Achsen sind
+The ternary axes are
 
 $$
 a_{\mathrm{axis}} = u,\qquad
