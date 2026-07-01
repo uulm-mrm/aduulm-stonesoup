@@ -310,7 +310,7 @@ import numpy as np
 # Ground-truth model parameters
 # ------------------------------------------------------------------
 dt = timedelta(seconds=0.1)
-num_steps = 1300
+num_steps = 1400
 
 # CV model before and after the turn
 gt_cv_model = CombinedLinearGaussianTransitionModel([
@@ -328,8 +328,8 @@ turn_rate = np.radians(-20.0)
 gt_right_turn_model = KnownTurnRate([q_x, q_y], turn_rate)
 
 # Turn interval
-turn_start = 800
-turn_end = 900   # 60 steps at dt=0.1s -> 6 seconds
+turn_start = 900
+turn_end = 1000   # 60 steps at dt=0.1s -> 6 seconds
 
 # ------------------------------------------------------------------
 # Initial ground truth
@@ -349,14 +349,14 @@ process_noise_coeff_memory = [[], []]
 
 # Import the disturbance method for the transition model
 from aduulm_scripts.utils.add_disturbance import disturbance_transition_model
-disturbance_factor_process = 20 if activate_disturbances else 1 #16
+disturbance_factor_process = 32 if activate_disturbances else 1 #16
 # Disturbance configurations for ground truth generation
 gt_transition_configs = {
     'noise_diff_coeff': [[q_x, q_y]],  # for transition model gt
-    'disturb_noise_coeff': [False, True],
+    'disturb_noise_coeff': [True, False],
     'disturbance_mode': ['jump'],
     # 'parameters': [[[150, disturbance_factor_process], [200, 1/disturbance_factor_process], [250, disturbance_factor_process], [300, 1/disturbance_factor_process]]] #, [[99, 1/100]]]
-    'parameters': [[[1000, disturbance_factor_process], [1200, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
+    'parameters': [[[1100, disturbance_factor_process], [1300, 1/disturbance_factor_process]]], #, [800, 1/disturbance_factor_process], [850, disturbance_factor_process]]]
 }
 
 # ------------------------------------------------------------------
@@ -481,7 +481,7 @@ gt_measurement_configs = {
     # 'disturbance_mode': ['jump', 'drift', 'outliers'],
     # 'parameters': [[[50, 4], [100, 0.25]], [[200, 300, 2.5], [300, 400, 0.4]], [[500, 550, 5, 5]]]
     'disturbance_mode': ['jump', 'outliers'],
-    'parameters': [[[200, disturbance_factor_meas, [1, 0]], [300, 1/disturbance_factor_meas, [1, 0]], [400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]], [[100, 150, 5, 5]]], #[400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]]],
+    'parameters': [[[300, disturbance_factor_meas, [1, 0]], [400, 1/disturbance_factor_meas, [1, 0]], [500, 1/disturbance_factor_meas, [1, 1]], [600, disturbance_factor_meas, [1, 1]]], [[100, 200, 10, 8]]], #[400, 1/disturbance_factor_meas, [1, 1]], [500, disturbance_factor_meas, [1, 1]]]],
     # 'disturb_noise_coeff': [[1, 0], [1, 1]], #[x, y], # 0= no disturbance, 1= disturbance_factor_meas, 2= 1/disturbance_factor_meas
 }
 meas_std_dev_memory = []
@@ -491,7 +491,7 @@ meas_truncated_gaussian_memory = []
 measurements = []
 rng = np.random.default_rng(1)
 correlated_noise_interval = [] #list(range(400, 500))
-alternative_noise_interval = list(range(600, 700))
+alternative_noise_interval = list(range(700, 800))
 
 for truth in truths:
     for k, state in enumerate(truth):
@@ -1603,7 +1603,7 @@ for i, op in enumerate(buffered_ops):  # z.B. op_buffer history speichern
     dc_adj_l1.append(dc_l1_norm)
 
     op_l1 = sl.Opinion2d(1.0 - u - dc_l1_norm, dc_l1_norm)
-    op_l1.prior_belief_masses = [0.99, 0.01]
+    # op_l1.prior_belief_masses = [0.99, 0.01]
     # L2
     d2_max = np.sqrt(1.0 - 1.0 / W)
     dc_adj_l2.append(c * np.linalg.norm(b_tilde - a) / d2_max)
@@ -1639,7 +1639,7 @@ p_ok_white_y = []
 p_ok_whiteness = []
 u_whiteness = []
 
-prior_ok = 0.99 #float(np.sqrt(0.5))
+prior_ok = float(np.sqrt(0.5))
 
 for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     opx, opy = ops
@@ -2190,11 +2190,660 @@ fig = plot_selfassessment_with_nis(selfassessor_measures_history, nis_measures_h
 # plotter.fig.show(renderer="browser")
 # import sys
 # sys.exit(0)
+
+# %%
+import numpy as np
+import plotly.graph_objects as go
+
+def add_following_zoom_to_animated_plot(
+    fig,
+    states,
+    mapping=(0, 2),
+    half_width=20.0,
+    half_height=20.0,
+    frame_duration=8,
+    transition_duration=0,
+    xaxis_name="xaxis",
+    yaxis_name="yaxis",
+    keep_aspect=True,
+):
+    """
+    Add a moving viewport to a Plotly animation.
+
+    Important:
+        Call this AFTER fig.set_subplots(...), AFTER all fig.add_trace(...),
+        and AFTER all fig.update_layout(...).
+
+    For your first subplot, the relevant layout axes are usually:
+        xaxis_name="xaxis"
+        yaxis_name="yaxis"
+    """
+    import numpy as np
+    import plotly.graph_objects as go
+
+    centers = []
+    for state in states:
+        x = np.asarray(state.state_vector, dtype=float).reshape(-1)
+        centers.append((float(x[mapping[0]]), float(x[mapping[1]])))
+
+    if not centers:
+        raise ValueError("No states provided for following zoom.")
+
+    n_frames = len(fig.frames)
+
+    if n_frames == 0:
+        raise ValueError("Figure has no animation frames.")
+
+    if len(centers) < n_frames:
+        centers += [centers[-1]] * (n_frames - len(centers))
+    else:
+        centers = centers[:n_frames]
+
+    # Initial view
+    cx0, cy0 = centers[0]
+
+    fig.layout[xaxis_name].update(
+        range=[cx0 - half_width, cx0 + half_width],
+        autorange=False,
+        fixedrange=False,
+    )
+    fig.layout[yaxis_name].update(
+        range=[cy0 - half_height, cy0 + half_height],
+        autorange=False,
+        fixedrange=False,
+    )
+
+    if keep_aspect:
+        fig.layout[yaxis_name].update(
+            scaleanchor="x",
+            scaleratio=1,
+        )
+
+    # Update every frame layout.
+    new_frames = []
+
+    for frame, (cx, cy) in zip(fig.frames, centers):
+        # Preserve possible existing frame layout
+        old_layout = frame.layout.to_plotly_json() if frame.layout is not None else {}
+
+        old_layout[xaxis_name] = {
+            **old_layout.get(xaxis_name, {}),
+            "range": [cx - half_width, cx + half_width],
+            "autorange": False,
+            "fixedrange": False,
+        }
+
+        old_layout[yaxis_name] = {
+            **old_layout.get(yaxis_name, {}),
+            "range": [cy - half_height, cy + half_height],
+            "autorange": False,
+            "fixedrange": False,
+        }
+
+        if keep_aspect:
+            old_layout[yaxis_name]["scaleanchor"] = "x"
+            old_layout[yaxis_name]["scaleratio"] = 1
+
+        new_frames.append(
+            go.Frame(
+                data=frame.data,
+                name=frame.name,
+                traces=frame.traces,
+                layout=go.Layout(old_layout),
+            )
+        )
+
+    fig.frames = tuple(new_frames)
+
+    # Force animation to redraw layout changes.
+    if fig.layout.updatemenus:
+        for menu in fig.layout.updatemenus:
+            for button in menu.buttons:
+                if button.method == "animate":
+                    button.args = [
+                        button.args[0],
+                        {
+                            "frame": {
+                                "duration": frame_duration,
+                                "redraw": True,
+                            },
+                            "transition": {
+                                "duration": transition_duration,
+                            },
+                            "fromcurrent": True,
+                            "mode": "immediate",
+                        },
+                    ]
+
+    if fig.layout.sliders:
+        for slider in fig.layout.sliders:
+            for step in slider.steps:
+                step.args = [
+                    step.args[0],
+                    {
+                        "frame": {
+                            "duration": frame_duration,
+                            "redraw": True,
+                        },
+                        "transition": {
+                            "duration": transition_duration,
+                        },
+                        "mode": "immediate",
+                    },
+                ]
+
+    return fig
+
+import numpy as np
+import plotly.graph_objects as go
+
+
+def make_follow_track_animation(
+    truth,
+    track,
+    measurements=None,
+    state_mapping=(0, 2),
+    follow="track",
+    half_width=20.0,
+    half_height=20.0,
+    tail_length=25,
+    frame_stride=2,
+    frame_duration=1,
+    show_measurements=True,
+):
+    """
+    Fast Plotly animation with fixed axes and moving data.
+
+    Instead of moving xaxis/yaxis ranges, all positions are transformed
+    into coordinates relative to the current follow center.
+
+    This avoids Plotly's slow/inconsistent live relayout during animation.
+
+    Parameters
+    ----------
+    truth : GroundTruthPath
+    track : Track
+    measurements : list[Detection] or None
+    state_mapping : tuple[int, int]
+        Position indices in state vector. In your setup: (0, 2).
+    follow : {"track", "truth"}
+        Defines the moving center.
+    half_width, half_height : float
+        Visible window size around the followed object.
+    tail_length : int
+        Number of previous samples shown as trail.
+    frame_stride : int
+        Use every n-th frame. Higher = faster animation.
+    frame_duration : int
+        Milliseconds per frame. Smaller = faster.
+    show_measurements : bool
+        Plot measurements if available.
+    """
+
+    def states_to_xy(states, mapping):
+        xy = []
+        for s in states:
+            x = np.asarray(s.state_vector, dtype=float).reshape(-1)
+            xy.append([float(x[mapping[0]]), float(x[mapping[1]])])
+        return np.asarray(xy, dtype=float)
+
+    def measurements_to_xy(detections):
+        xy = []
+        for d in detections:
+            z = np.asarray(d.state_vector, dtype=float).reshape(-1)
+            xy.append([float(z[0]), float(z[1])])
+        return np.asarray(xy, dtype=float)
+
+    truth_xy = states_to_xy(truth, state_mapping)
+    track_xy = states_to_xy(track, state_mapping)
+
+    n = min(len(truth_xy), len(track_xy))
+
+    truth_xy = truth_xy[:n]
+    track_xy = track_xy[:n]
+
+    if measurements is not None:
+        meas_xy = measurements_to_xy(measurements)[:n]
+    else:
+        meas_xy = None
+
+    if follow == "track":
+        centers = track_xy
+    elif follow == "truth":
+        centers = truth_xy
+    else:
+        raise ValueError("follow must be 'track' or 'truth'.")
+
+    frame_indices = list(range(0, n, frame_stride))
+
+    def rel_tail(xy, k):
+        start = max(0, k - tail_length + 1)
+        center = centers[k]
+        return xy[start:k + 1] - center
+
+    def rel_point(xy, k):
+        return xy[k:k + 1] - centers[k]
+
+    k0 = frame_indices[0]
+
+    truth_rel0 = rel_tail(truth_xy, k0)
+    track_rel0 = rel_tail(track_xy, k0)
+
+    data = [
+        go.Scatter(
+            x=truth_rel0[:, 0],
+            y=truth_rel0[:, 1],
+            mode="lines+markers",
+            name="Ground truth",
+            marker=dict(size=5),
+        ),
+        go.Scatter(
+            x=track_rel0[:, 0],
+            y=track_rel0[:, 1],
+            mode="lines+markers",
+            name="Track",
+            marker=dict(size=5),
+        ),
+        go.Scatter(
+            x=[0.0],
+            y=[0.0],
+            mode="markers",
+            name=f"Follow center ({follow})",
+            marker=dict(size=10, symbol="cross"),
+        ),
+    ]
+
+    if show_measurements and meas_xy is not None:
+        meas_rel0 = rel_point(meas_xy, k0)
+        data.append(
+            go.Scatter(
+                x=meas_rel0[:, 0],
+                y=meas_rel0[:, 1],
+                mode="markers",
+                name="Measurement",
+                marker=dict(size=6, symbol="x"),
+            )
+        )
+
+    frames = []
+
+    for k in frame_indices:
+        truth_rel = rel_tail(truth_xy, k)
+        track_rel = rel_tail(track_xy, k)
+
+        frame_data = [
+            go.Scatter(
+                x=truth_rel[:, 0],
+                y=truth_rel[:, 1],
+                mode="lines+markers",
+            ),
+            go.Scatter(
+                x=track_rel[:, 0],
+                y=track_rel[:, 1],
+                mode="lines+markers",
+            ),
+            go.Scatter(
+                x=[0.0],
+                y=[0.0],
+                mode="markers",
+            ),
+        ]
+
+        if show_measurements and meas_xy is not None:
+            meas_rel = rel_point(meas_xy, k)
+            frame_data.append(
+                go.Scatter(
+                    x=meas_rel[:, 0],
+                    y=meas_rel[:, 1],
+                    mode="markers",
+                )
+            )
+
+        cx, cy = centers[k]
+
+        frames.append(
+            go.Frame(
+                data=frame_data,
+                name=str(k),
+                layout=go.Layout(
+                    title=(
+                        f"Follow-{follow} animation | "
+                        f"k={k}, center=({cx:.1f}, {cy:.1f})"
+                    )
+                )
+            )
+        )
+
+    fig = go.Figure(data=data, frames=frames)
+
+    fig.update_layout(
+        title=f"Follow-{follow} animation",
+        xaxis=dict(
+            range=[-half_width, half_width],
+            autorange=False,
+            title="relative x [m]",
+            zeroline=True,
+        ),
+        yaxis=dict(
+            range=[-half_height, half_height],
+            autorange=False,
+            title="relative y [m]",
+            zeroline=True,
+            scaleanchor="x",
+            scaleratio=1,
+        ),
+        width=900,
+        height=800,
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                buttons=[
+                    dict(
+                        label="Play",
+                        method="animate",
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(
+                                    duration=frame_duration,
+                                    redraw=False,
+                                ),
+                                transition=dict(duration=0),
+                                fromcurrent=True,
+                                mode="immediate",
+                            ),
+                        ],
+                    ),
+                    dict(
+                        label="Stop",
+                        method="animate",
+                        args=[
+                            [None],
+                            dict(
+                                frame=dict(duration=0, redraw=False),
+                                transition=dict(duration=0),
+                                mode="immediate",
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        ],
+        sliders=[
+            dict(
+                steps=[
+                    dict(
+                        method="animate",
+                        args=[
+                            [str(k)],
+                            dict(
+                                mode="immediate",
+                                frame=dict(duration=0, redraw=False),
+                                transition=dict(duration=0),
+                            ),
+                        ],
+                        label=str(k),
+                    )
+                    for k in frame_indices
+                ],
+                currentvalue=dict(prefix="k = "),
+            )
+        ],
+    )
+
+    return fig
+
+# fig_follow = make_follow_track_animation(
+#     truth=truth,
+#     track=track,
+#     measurements=measurements,
+#     state_mapping=(0, 2),
+#     follow="track",          # oder "truth"
+#     half_width=12.0,         # näher dran
+#     half_height=12.0,
+#     tail_length=25,
+#     frame_stride=3,          # schneller: 3 oder 5
+#     frame_duration=1,        # sehr schnell
+#     show_measurements=True,
+# )
+#
+# fig_follow.show(renderer="browser")
+
+def get_xy_centers_from_states(states, mapping=(0, 2)):
+    centers = []
+    for state in states:
+        x = np.asarray(state.state_vector, dtype=float).reshape(-1)
+        centers.append([float(x[mapping[0]]), float(x[mapping[1]])])
+    return np.asarray(centers, dtype=float)
+
+
+def shift_xy_trace_to_follow_center(trace, center):
+    """
+    Shifts one xy trace into coordinates relative to center.
+
+    Only applies to traces with x/y data.
+    Ternary, bar etc. are left untouched by caller.
+    """
+    if not hasattr(trace, "x") or not hasattr(trace, "y"):
+        return trace
+
+    if trace.x is None or trace.y is None:
+        return trace
+
+    try:
+        x = np.asarray(trace.x, dtype=float)
+        y = np.asarray(trace.y, dtype=float)
+    except Exception:
+        return trace
+
+    trace.x = x - center[0]
+    trace.y = y - center[1]
+    trace.xaxis = "x"
+    trace.yaxis = "y"
+
+    return trace
+
+
+def apply_follow_view_to_existing_animation(
+    fig,
+    follow_states,
+    n_tracking_traces,
+    mapping=(0, 2),
+    half_width=18.0,
+    half_height=18.0,
+    frame_duration=5,
+    frame_stride=1,
+    redraw=False,
+):
+    """
+    Converts only the tracking subplot of an existing Plotly animation
+    to a relative follow-view.
+
+    Important:
+        This does NOT move xaxis/yaxis per frame.
+        It shifts the tracking trace data per frame.
+
+    Parameters
+    ----------
+    fig : plotly.graph_objects.Figure
+        Your combined subplot figure.
+    follow_states : Track or GroundTruthPath
+        States used as moving center.
+    n_tracking_traces : int
+        Number of original Stone Soup tracking traces.
+        Capture this before adding ternary/bar/etc. traces.
+    mapping : tuple
+        Position state indices, usually (0, 2).
+    half_width, half_height : float
+        Fixed visible follow window.
+    frame_duration : int
+        ms per frame.
+    frame_stride : int
+        Keep every n-th frame. Use 2, 3, or 5 for faster playback.
+    """
+    centers = get_xy_centers_from_states(follow_states, mapping=mapping)
+
+    if len(centers) == 0:
+        raise ValueError("No follow centers available.")
+
+    # Optional speed-up: reduce number of frames.
+    if frame_stride > 1:
+        kept_frames = []
+        kept_centers = []
+
+        for idx, frame in enumerate(fig.frames):
+            if idx % frame_stride == 0:
+                kept_frames.append(frame)
+                center_idx = min(idx, len(centers) - 1)
+                kept_centers.append(centers[center_idx])
+
+        fig.frames = tuple(kept_frames)
+        centers_for_frames = np.asarray(kept_centers)
+    else:
+        centers_for_frames = centers[:len(fig.frames)]
+
+    if len(centers_for_frames) < len(fig.frames):
+        pad = np.repeat(centers_for_frames[-1][None, :],
+                        len(fig.frames) - len(centers_for_frames),
+                        axis=0)
+        centers_for_frames = np.vstack([centers_for_frames, pad])
+
+    # Shift initial/base tracking traces using first center.
+    center0 = centers_for_frames[0]
+
+    for trace_idx in range(min(n_tracking_traces, len(fig.data))):
+        tr = fig.data[trace_idx]
+        if getattr(tr, "type", None) == "scatter":
+            shift_xy_trace_to_follow_center(tr, center0)
+
+    # Shift tracking traces inside each frame.
+    new_frames = []
+
+    for frame_idx, frame in enumerate(fig.frames):
+        center = centers_for_frames[frame_idx]
+        new_data = list(frame.data)
+
+        # Only the original Stone Soup xy traces are shifted.
+        for trace_idx in range(min(n_tracking_traces, len(new_data))):
+            tr = new_data[trace_idx]
+            if getattr(tr, "type", None) == "scatter":
+                shift_xy_trace_to_follow_center(tr, center)
+
+        new_frames.append(
+            go.Frame(
+                data=new_data,
+                name=str(frame_idx),
+                traces=frame.traces,
+                layout=frame.layout,
+            )
+        )
+
+    fig.frames = tuple(new_frames)
+
+    # Fixed tracking subplot axes.
+    fig.update_xaxes(
+        range=[-half_width, half_width],
+        autorange=False,
+        title_text="relative x [m]",
+        row=1,
+        col=1,
+    )
+
+    fig.update_yaxes(
+        range=[-half_height, half_height],
+        autorange=False,
+        title_text="relative y [m]",
+        scaleanchor="x",
+        scaleratio=1,
+        row=1,
+        col=1,
+    )
+
+    # Fast animation controls.
+    play_args = [
+        None,
+        dict(
+            frame=dict(duration=frame_duration, redraw=redraw),
+            transition=dict(duration=0),
+            fromcurrent=True,
+            mode="immediate",
+        ),
+    ]
+
+    stop_args = [
+        [None],
+        dict(
+            frame=dict(duration=0, redraw=redraw),
+            transition=dict(duration=0),
+            mode="immediate",
+        ),
+    ]
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                x=0.0,
+                y=0.0,
+                xanchor="left",
+                yanchor="top",
+                buttons=[
+                    dict(label="Play", method="animate", args=play_args),
+                    dict(label="Stop", method="animate", args=stop_args),
+                ],
+            )
+        ]
+    )
+
+    # Rebuild slider for possibly reduced frame list.
+    slider_steps = [
+        dict(
+            method="animate",
+            args=[
+                [str(i)],
+                dict(
+                    mode="immediate",
+                    frame=dict(duration=0, redraw=redraw),
+                    transition=dict(duration=0),
+                ),
+            ],
+            label=str(i),
+        )
+        for i in range(len(fig.frames))
+    ]
+
+    fig.update_layout(
+        sliders=[
+            dict(
+                steps=slider_steps,
+                currentvalue=dict(prefix="Step: "),
+                pad=dict(t=30),
+            )
+        ]
+    )
+
+    return fig
+
 # %%
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 show_all_opinion = False
 fig = plotter.fig
+n_tracking_traces = len(fig.data)
+
+# add_following_zoom_to_animated_plot(
+#     fig,
+#     states=track,          # folgt dem geschätzten Track
+#     mapping=(0, 2),
+#     half_width=30.0,       # näher dran
+#     half_height=30.0,
+#     frame_duration=15,     # schneller
+#     transition_duration=0,
+#     keep_aspect=True,
+# )
+
 
 fig.set_subplots(
     rows=4, cols=5,
@@ -2229,8 +2878,8 @@ fig.add_trace(
 
         mode='markers',
         marker=dict(size=[14, 14], color=['purple', 'cyan']),
-        hovertemplate=["F1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "F2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="Global Opinion"
+        hovertemplate=["Overall<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Griebel<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        name="Overall/Griebel"
     ),
     row=1, col=4
 )
@@ -2246,7 +2895,7 @@ fig.add_trace(
         c=[P0],
         mode='markers',
         marker=dict(size=10, color='purple'),
-        name='Projected Probability',
+        name='PP Overall',
         hovertemplate="P: %{c:.2f}<extra></extra>"
     ),
     row=1, col=4
@@ -2259,7 +2908,7 @@ fig.add_trace(
                 c=[b0_f, P0],
                 mode='lines',
                 line=dict(color='purple', dash='dot'),
-                showlegend=False
+                showlegend=False,
             ),
     row=1, col=4
 )
@@ -2274,7 +2923,7 @@ fig.add_trace(
         c=[P0_2],
         mode='markers',
         marker=dict(size=10, color='cyan'),
-        name='Projected Probability',
+        name='PP Griebel',
         hovertemplate="P: %{c:.2f}<extra></extra>"
     ),
     row=1, col=4
@@ -2340,7 +2989,7 @@ fig.add_trace(
         hovertemplate=["H3<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
                        "KL<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
                        "AD<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"]  if show_all_opinion else ["Components<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Radial<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="Innovation"
+        name="Components/Radial"
     ),
     row=3, col=4
 )
@@ -2372,7 +3021,7 @@ fig.add_trace(
         hovertemplate=["H4<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
                        "H4.1<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>",
                        "H4.2<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"] if show_all_opinion else ["X<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Y<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
-        name="H4"
+        name="x-/y-Comp"
     ),
     row=3, col=5
 )
@@ -2411,7 +3060,7 @@ fig.add_trace(
     go.Bar(
         x=list(range(M)),
         y=counts_history[0],
-        name="H3 counts",
+        name="Short Term Buffer Radial",
         marker=dict(color='cyan')
 
     ),
@@ -2422,7 +3071,7 @@ fig.add_trace(
     go.Bar(
         x=list(range(W)),
         y=evidences[0],
-        name="Buffer evidence",
+        name="LTST Buffer Radial",
         marker=dict(color='cyan')
 
     ),
@@ -2577,23 +3226,23 @@ for i, frame in enumerate(fig.frames):
 
 fig.frames = new_frames
 
-sliders = [dict(
-    steps=[
-        dict(
-            method='animate',
-            args=[[str(i)],
-                  dict(mode='immediate',
-                       frame=dict(duration=1000, redraw=True),
-                       transition=dict(duration=0))],
-            label=str(i)
-        )
-        for i in range(len(fig.frames))
-    ],
-    currentvalue=dict(prefix="Step: "),
-    pad=dict(t=30),
-)]
-
-fig.update_layout(sliders=sliders)
+# sliders = [dict(
+#     steps=[
+#         dict(
+#             method='animate',
+#             args=[[str(i)],
+#                   dict(mode='immediate',
+#                        frame=dict(duration=1000, redraw=True),
+#                        transition=dict(duration=0))],
+#             label=str(i)
+#         )
+#         for i in range(len(fig.frames))
+#     ],
+#     currentvalue=dict(prefix="Step: "),
+#     pad=dict(t=30),
+# )]
+#
+# fig.update_layout(sliders=sliders)
 
 fig.update_layout(
     height=1000,
@@ -2662,7 +3311,35 @@ for ann in fig.layout.annotations:
     elif "Overall" in ann.text:
         ann.update(x=ann.x - 0.15, y=ann.y - 0.05, xanchor='left', align='left')
 
-plotter.fig.show(renderer="browser")
-plotter.show()
+# add_following_zoom_to_animated_plot(
+#     fig,
+#     states=track,          # oder truth, wenn du Ground Truth folgen willst
+#     mapping=(0, 2),
+#     half_width=18.0,       # näher dran
+#     half_height=18.0,
+#     frame_duration=1,      # schneller
+#     transition_duration=0,
+#     xaxis_name="xaxis",
+#     yaxis_name="yaxis",
+#     keep_aspect=True,
+# )
+
+fig = apply_follow_view_to_existing_animation(
+    fig,
+    follow_states=track,          # oder truth
+    n_tracking_traces=n_tracking_traces,
+    mapping=(0, 2),
+    half_width=12.0,              # näher dran
+    half_height=12.0,
+    frame_duration=100,             # schneller
+    frame_stride=1,               # 2, 3 oder 5 für mehr Speed
+    redraw= True,
+)
+
+fig.show(renderer="browser")
+plt.show()
+
+# plotter.fig.show(renderer="browser")
+# plotter.show()
 
 plt.show()
