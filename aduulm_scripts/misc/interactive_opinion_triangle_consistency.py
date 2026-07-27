@@ -21,12 +21,37 @@ DEFAULTS = {
     "a_prior": 0.50,
     "b_ex": 0.65,
     "u_ex": 0.10,
+    "visible_regions": ["consistent", "inconsistent", "undecided"],
 }
 
 
 # ============================================================
-# 1) Opinion -> probability that latent p_OK exceeds tau_OK
+# 1) Opinion -> induced beta distribution and decision probabilities
 # ============================================================
+
+def beta_parameters_from_opinion(
+    b: float,
+    d: float,
+    u: float,
+    a_prior: float = 0.5,
+) -> tuple[float, float]:
+    """
+    Converts a binomial subjective-logic opinion omega = (b, d, u, a)
+    into the corresponding beta parameters.
+
+    Standard binomial subjective logic uses a prior weight of W = 2.
+    Therefore:
+
+        alpha = 2 b / u + 2 a
+        beta  = 2 d / u + 2 (1 - a)
+
+    This function assumes u > 0.
+    """
+    alpha = 2.0 * b / u + 2.0 * a_prior
+    beta_param = 2.0 * d / u + 2.0 * (1.0 - a_prior)
+
+    return alpha, beta_param
+
 
 def q_consistent(
     b: float,
@@ -38,28 +63,11 @@ def q_consistent(
     """
     Computes
 
-        q(omega) = Pr(p_OK > tau_OK | omega)
+        q_OK(omega) = Pr(theta > tau_OK | omega)
 
-    with the beta density induced by a binomial subjective-logic
-    opinion omega = (b, d, u, a).
-
-    Parameters
-    ----------
-    b : float
-        Belief mass.
-    d : float
-        Disbelief mass.
-    u : float
-        Uncertainty mass.
-    a_prior : float
-        Base rate a.
-    tau_ok : float
-        Threshold tau_OK.
-
-    Returns
-    -------
-    float
-        Probability Pr(p_OK > tau_OK | omega).
+    with the beta density induced by a binomial subjective-logic opinion
+    omega = (b, d, u, a). The latent variable theta denotes the
+    probability of the proposition "consistent".
     """
     eps = 1e-12
 
@@ -77,86 +85,149 @@ def q_consistent(
     d = np.clip(float(d), 0.0, 1.0)
     u = float(u)
 
-    alpha = 2.0 * b / u + 2.0 * a_prior
-    beta_param = 2.0 * d / u + 2.0 * (1.0 - a_prior)
+    alpha, beta_param = beta_parameters_from_opinion(
+        b=b,
+        d=d,
+        u=u,
+        a_prior=a_prior,
+    )
 
     return 1.0 - beta.cdf(tau_ok, alpha, beta_param)
 
 
-# ============================================================
-# 2) Maximal uncertainty u_max
-# ============================================================
-
-def find_u_max(
-    eta: float = 0.95,
-    tau_ok: float = 0.5,
+def q_inconsistent(
+    b: float,
+    d: float,
+    u: float,
     a_prior: float = 0.5,
-) -> float | None:
+    tau_ok: float = 0.5,
+) -> float:
     """
-    Finds the largest uncertainty u such that there still exists
-    an opinion satisfying
+    Computes
 
-        Pr(p_OK > tau_OK | omega) >= eta.
+        q_NOT_OK(omega) = Pr(theta < tau_OK | omega)
 
-    The most favorable opinion for fixed uncertainty u is
-
-        b = 1 - u, d = 0.
+    with the beta density induced by a binomial subjective-logic opinion
+    omega = (b, d, u, a). This is the credibility that the latent
+    consistency probability is below tau_OK.
     """
-    eps = 1e-10
+    eps = 1e-12
 
-    def f(u: float) -> float:
-        b = 1.0 - u
-        d = 0.0
+    # Dogmatic limit
+    if u <= eps:
+        p_ok = b + a_prior * u
 
-        return q_consistent(
-            b=b,
-            d=d,
-            u=u,
-            a_prior=a_prior,
-            tau_ok=tau_ok,
-        ) - eta
+        if p_ok < tau_ok:
+            return 1.0
+        if p_ok > tau_ok:
+            return 0.0
+        return 0.5
 
-    f_low = f(eps)
-    f_high = f(1.0 - eps)
+    b = np.clip(float(b), 0.0, 1.0)
+    d = np.clip(float(d), 0.0, 1.0)
+    u = float(u)
 
-    # Even at maximal uncertainty, the condition is fulfilled.
-    if f_high >= 0:
-        return 1.0
+    alpha, beta_param = beta_parameters_from_opinion(
+        b=b,
+        d=d,
+        u=u,
+        a_prior=a_prior,
+    )
 
-    # Even the nearly dogmatic maximal-belief opinion is insufficient.
-    if f_low < 0:
-        return None
-
-    return brentq(f, eps, 1.0 - eps)
+    return beta.cdf(tau_ok, alpha, beta_param)
 
 
 # ============================================================
-# 3) Boundary curve q(omega) = eta
+# 2) Feasible ranges and coordinate conversions
 # ============================================================
 
-def p_ok_boundary_for_u(
+def p_ok_feasible_interval(
+    u: float,
+    a_prior: float = 0.5,
+) -> tuple[float, float]:
+    """
+    Returns the feasible projected-probability interval for a fixed
+    uncertainty u:
+
+        P_OK = b + a u.
+
+    Since b in [0, 1-u], the feasible interval is
+
+        [a u, 1 - (1-a) u].
+    """
+    p_low = a_prior * u
+    p_high = 1.0 - (1.0 - a_prior) * u
+
+    return p_low, p_high
+
+
+def opinion_from_u_and_p_ok(
+    u: float,
+    p_ok: float,
+    a_prior: float = 0.5,
+) -> tuple[float, float, float]:
+    """
+    Converts fixed uncertainty u and projected probability P_OK into
+    the corresponding opinion components (b, d, u).
+    """
+    b = p_ok - a_prior * u
+    d = 1.0 - u - b
+
+    b = float(np.clip(b, 0.0, 1.0))
+    d = float(np.clip(d, 0.0, 1.0))
+    u = float(np.clip(u, 0.0, 1.0))
+
+    return b, d, u
+
+
+def ternary_arrays_from_opinions(
+    opinions: list[tuple[float, float, float]],
+) -> tuple[list[float], list[float], list[float]]:
+    """
+    Plotly ternary convention used in this app:
+
+        a-axis = uncertainty u
+        b-axis = disbelief d
+        c-axis = belief b
+    """
+    a_values = [op[2] for op in opinions]
+    b_values = [op[1] for op in opinions]
+    c_values = [op[0] for op in opinions]
+
+    return a_values, b_values, c_values
+
+
+# ============================================================
+# 3) Decision boundary curves
+# ============================================================
+
+def boundary_p_ok_for_u(
     u: float,
     eta: float = 0.95,
     tau_ok: float = 0.5,
     a_prior: float = 0.5,
+    side: str = "consistent",
 ) -> float | str | None:
     """
-    For fixed uncertainty u, finds the minimal projected probability
+    For fixed uncertainty u, finds the boundary projected probability
+    P_OK for one of the two beta-credible decision regions.
 
-        P_OK = b + a u
+    For side="consistent", the boundary is the minimal P_OK such that
 
-    such that
+        Pr(theta > tau_OK | omega) = eta.
 
-        Pr(p_OK > tau_OK | omega) = eta.
+    For side="inconsistent", the boundary is the maximal P_OK such that
+
+        Pr(theta < tau_OK | omega) = eta.
 
     Returns
     -------
     float
         Boundary projected probability P_OK.
     "all"
-        The complete u-slice is already consistent.
+        The complete u-slice already satisfies the requested decision.
     None
-        No feasible opinion at this u satisfies the condition.
+        No feasible opinion at this u satisfies the requested decision.
     """
     eps = 1e-10
     u = float(u)
@@ -164,39 +235,264 @@ def p_ok_boundary_for_u(
     if u <= eps:
         return tau_ok
 
-    def f(p_ok: float) -> float:
-        b = p_ok - a_prior * u
-        d = 1.0 - u - b
+    p_low, p_high = p_ok_feasible_interval(
+        u=u,
+        a_prior=a_prior,
+    )
 
-        b = np.clip(b, 0.0, 1.0)
-        d = np.clip(d, 0.0, 1.0)
+    def eval_probability(p_ok: float) -> float:
+        b, d, u_local = opinion_from_u_and_p_ok(
+            u=u,
+            p_ok=p_ok,
+            a_prior=a_prior,
+        )
 
-        return q_consistent(
-            b=b,
-            d=d,
+        if side == "consistent":
+            return q_consistent(
+                b=b,
+                d=d,
+                u=u_local,
+                a_prior=a_prior,
+                tau_ok=tau_ok,
+            )
+
+        if side == "inconsistent":
+            return q_inconsistent(
+                b=b,
+                d=d,
+                u=u_local,
+                a_prior=a_prior,
+                tau_ok=tau_ok,
+            )
+
+        raise ValueError(f"Unknown side: {side}")
+
+    f_low = eval_probability(p_low + eps) - eta
+    f_high = eval_probability(p_high - eps) - eta
+
+    if side == "consistent":
+        # q_consistent increases with P_OK.
+        if f_high < 0:
+            return None
+        if f_low >= 0:
+            return "all"
+        return brentq(
+            lambda p: eval_probability(p) - eta,
+            p_low + eps,
+            p_high - eps,
+        )
+
+    # q_inconsistent decreases with P_OK.
+    if f_low < 0:
+        return None
+    if f_high >= 0:
+        return "all"
+    return brentq(
+        lambda p: eval_probability(p) - eta,
+        p_low + eps,
+        p_high - eps,
+    )
+
+
+def compute_decision_geometry(
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+    n_boundary: int = 220,
+) -> dict[str, object]:
+    """
+    Computes ternary boundary curves and filled polygons for
+    consistent, inconsistent, and undecided decision regions.
+    """
+    eps_area = 1e-8
+
+    consistent_boundary: list[tuple[float, float, float]] = []
+    inconsistent_boundary: list[tuple[float, float, float]] = []
+
+    undecided_lower: list[tuple[float, float, float]] = []
+    undecided_upper: list[tuple[float, float, float]] = []
+
+    u_grid = np.linspace(0.0, 1.0, n_boundary)
+
+    for u in u_grid:
+        p_low, p_high = p_ok_feasible_interval(
             u=u,
             a_prior=a_prior,
+        )
+
+        # -------------------------------
+        # Consistent boundary
+        # -------------------------------
+        p_cons_result = boundary_p_ok_for_u(
+            u=u,
+            eta=eta,
             tau_ok=tau_ok,
-        ) - eta
+            a_prior=a_prior,
+            side="consistent",
+        )
 
-    # Feasible projected-probability interval for fixed u
-    p_low = a_prior * u
-    p_high = 1.0 - (1.0 - a_prior) * u
+        if p_cons_result is None:
+            p_cons_for_undecided = p_high
+        elif p_cons_result == "all":
+            p_cons_for_undecided = p_low
+            consistent_boundary.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_low,
+                    a_prior=a_prior,
+                )
+            )
+        else:
+            p_cons_for_undecided = float(p_cons_result)
+            consistent_boundary.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_cons_for_undecided,
+                    a_prior=a_prior,
+                )
+            )
 
-    f_low = f(p_low + eps)
-    f_high = f(p_high - eps)
+        # -------------------------------
+        # Inconsistent boundary
+        # -------------------------------
+        p_inc_result = boundary_p_ok_for_u(
+            u=u,
+            eta=eta,
+            tau_ok=tau_ok,
+            a_prior=a_prior,
+            side="inconsistent",
+        )
 
-    if f_high < 0:
+        if p_inc_result is None:
+            p_inc_for_undecided = p_low
+        elif p_inc_result == "all":
+            p_inc_for_undecided = p_high
+            inconsistent_boundary.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_high,
+                    a_prior=a_prior,
+                )
+            )
+        else:
+            p_inc_for_undecided = float(p_inc_result)
+            inconsistent_boundary.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_inc_for_undecided,
+                    a_prior=a_prior,
+                )
+            )
+
+        # -------------------------------
+        # Undecided interval for this u
+        # -------------------------------
+        if p_inc_for_undecided + eps_area < p_cons_for_undecided:
+            undecided_lower.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_inc_for_undecided,
+                    a_prior=a_prior,
+                )
+            )
+            undecided_upper.append(
+                opinion_from_u_and_p_ok(
+                    u=u,
+                    p_ok=p_cons_for_undecided,
+                    a_prior=a_prior,
+                )
+            )
+
+    # Polygon for the consistent region:
+    # decision boundary + edge d = 0.
+    consistent_polygon: list[tuple[float, float, float]] = []
+    if consistent_boundary:
+        consistent_polygon.extend(consistent_boundary)
+        for b, d, u in reversed(consistent_boundary):
+            consistent_polygon.append((1.0 - u, 0.0, u))
+
+    # Polygon for the inconsistent region:
+    # decision boundary + edge b = 0.
+    inconsistent_polygon: list[tuple[float, float, float]] = []
+    if inconsistent_boundary:
+        inconsistent_polygon.extend(inconsistent_boundary)
+        for b, d, u in reversed(inconsistent_boundary):
+            inconsistent_polygon.append((0.0, 1.0 - u, u))
+
+    # Polygon for the undecided region:
+    # lower boundary + reversed upper boundary.
+    undecided_polygon: list[tuple[float, float, float]] = []
+    if undecided_lower and undecided_upper:
+        undecided_polygon.extend(undecided_lower)
+        undecided_polygon.extend(reversed(undecided_upper))
+
+    return {
+        "consistent_boundary": consistent_boundary,
+        "inconsistent_boundary": inconsistent_boundary,
+        "consistent_polygon": consistent_polygon,
+        "inconsistent_polygon": inconsistent_polygon,
+        "undecided_polygon": undecided_polygon,
+        "n_consistent_boundary": len(consistent_boundary),
+        "n_inconsistent_boundary": len(inconsistent_boundary),
+        "n_undecided_polygon": len(undecided_polygon),
+    }
+
+
+def max_uncertainty_for_side(
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+    side: str,
+) -> float | None:
+    """
+    Finds the largest uncertainty u for which at least one opinion in
+    the u-slice satisfies the selected credible decision condition.
+    """
+    eps = 1e-10
+
+    def best_probability(u: float) -> float:
+        if side == "consistent":
+            b = 1.0 - u
+            d = 0.0
+            return q_consistent(
+                b=b,
+                d=d,
+                u=u,
+                a_prior=a_prior,
+                tau_ok=tau_ok,
+            )
+
+        if side == "inconsistent":
+            b = 0.0
+            d = 1.0 - u
+            return q_inconsistent(
+                b=b,
+                d=d,
+                u=u,
+                a_prior=a_prior,
+                tau_ok=tau_ok,
+            )
+
+        raise ValueError(f"Unknown side: {side}")
+
+    f_low = best_probability(eps) - eta
+    f_high = best_probability(1.0 - eps) - eta
+
+    if f_high >= 0:
+        return 1.0
+
+    if f_low < 0:
         return None
 
-    if f_low >= 0:
-        return "all"
-
-    return brentq(f, p_low + eps, p_high - eps)
+    return brentq(
+        lambda u: best_probability(u) - eta,
+        eps,
+        1.0 - eps,
+    )
 
 
 # ============================================================
-# 4) Example opinion validity
+# 4) Example opinion validity and decision state
 # ============================================================
 
 def compute_example_opinion(
@@ -234,9 +530,9 @@ def compute_example_opinion(
 
         return b_ex, d_ex, u_ex, False, message
 
-    b_ex = np.clip(b_ex, 0.0, 1.0)
-    u_ex = np.clip(u_ex, 0.0, 1.0)
-    d_ex = np.clip(d_ex, 0.0, 1.0)
+    b_ex = float(np.clip(b_ex, 0.0, 1.0))
+    u_ex = float(np.clip(u_ex, 0.0, 1.0))
+    d_ex = float(np.clip(d_ex, 0.0, 1.0))
 
     message = (
         "Valid example opinion:\n"
@@ -246,9 +542,126 @@ def compute_example_opinion(
     return b_ex, d_ex, u_ex, True, message
 
 
+def classify_opinion(
+    b: float,
+    d: float,
+    u: float,
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+) -> tuple[str, float, float]:
+    """
+    Classifies a valid opinion into one of the displayed decision regions.
+    """
+    q_ok = q_consistent(
+        b=b,
+        d=d,
+        u=u,
+        a_prior=a_prior,
+        tau_ok=tau_ok,
+    )
+    q_not_ok = q_inconsistent(
+        b=b,
+        d=d,
+        u=u,
+        a_prior=a_prior,
+        tau_ok=tau_ok,
+    )
+
+    if q_ok >= eta:
+        return "confidently consistent", q_ok, q_not_ok
+
+    if q_not_ok >= eta:
+        return "confidently inconsistent", q_ok, q_not_ok
+
+    return "undecided", q_ok, q_not_ok
+
+
 # ============================================================
 # 5) Figure construction
 # ============================================================
+
+def add_filled_region(
+    fig: go.Figure,
+    polygon: list[tuple[float, float, float]],
+    fillcolor: str,
+    linecolor: str,
+    name: str,
+    visible: bool,
+) -> None:
+    """
+    Adds a filled ternary polygon if requested and if it has enough points.
+    """
+    if not visible or len(polygon) < 3:
+        return
+
+    a_values, b_values, c_values = ternary_arrays_from_opinions(polygon)
+
+    fig.add_trace(
+        go.Scatterternary(
+            a=a_values,
+            b=b_values,
+            c=c_values,
+            mode="lines",
+            fill="toself",
+            fillcolor=fillcolor,
+            line=dict(color=linecolor, width=1),
+            name=name,
+            hoverinfo="skip",
+        )
+    )
+
+
+def add_boundary_curve(
+    fig: go.Figure,
+    boundary: list[tuple[float, float, float]],
+    linecolor: str,
+    dash: str,
+    name: str,
+    criterion: str,
+    a_prior: float,
+    visible: bool,
+) -> None:
+    """
+    Adds a ternary decision boundary curve.
+    """
+    if not visible or len(boundary) < 2:
+        return
+
+    a_values, b_values, c_values = ternary_arrays_from_opinions(boundary)
+
+    custom_boundary = np.array(
+        [
+            [
+                b,
+                d,
+                u,
+                b + a_prior * u,
+            ]
+            for b, d, u in boundary
+        ]
+    )
+
+    fig.add_trace(
+        go.Scatterternary(
+            a=a_values,
+            b=b_values,
+            c=c_values,
+            mode="lines",
+            line=dict(color=linecolor, width=3, dash=dash),
+            customdata=custom_boundary,
+            hovertemplate=(
+                "b = %{customdata[0]:.3f}<br>"
+                "d = %{customdata[1]:.3f}<br>"
+                "u = %{customdata[2]:.3f}<br>"
+                "P<sub>OK</sub> = %{customdata[3]:.3f}<br>"
+                f"{criterion}"
+                "<extra></extra>"
+            ),
+            name=name,
+        )
+    )
+
 
 def make_figure(
     eta: float,
@@ -256,15 +669,34 @@ def make_figure(
     a_prior: float,
     b_ex_raw: float,
     u_ex_raw: float,
-    n_boundary: int = 180,
+    visible_regions: list[str],
+    n_boundary: int = 220,
 ) -> tuple[go.Figure, str]:
     """
     Builds the ternary Plotly figure.
     """
-    u_max = find_u_max(
+    show_consistent = "consistent" in visible_regions
+    show_inconsistent = "inconsistent" in visible_regions
+    show_undecided = "undecided" in visible_regions
+
+    geometry = compute_decision_geometry(
         eta=eta,
         tau_ok=tau_ok,
         a_prior=a_prior,
+        n_boundary=n_boundary,
+    )
+
+    u_max_ok = max_uncertainty_for_side(
+        eta=eta,
+        tau_ok=tau_ok,
+        a_prior=a_prior,
+        side="consistent",
+    )
+    u_max_not_ok = max_uncertainty_for_side(
+        eta=eta,
+        tau_ok=tau_ok,
+        a_prior=a_prior,
+        side="inconsistent",
     )
 
     fig = go.Figure()
@@ -274,136 +706,62 @@ def make_figure(
         u_ex=u_ex_raw,
     )
 
-    if u_max is None:
-        title = (
-            r"$\text{No consistent region exists for }"
-            rf"\eta={eta:.3f},\ "
-            rf"\tau_{{\mathrm{{OK}}}}={tau_ok:.3f},\ "
-            rf"a={a_prior:.3f}$"
-        )
+    # --------------------------------------------------------
+    # Filled regions: draw undecided first so decision regions
+    # are visually on top of it.
+    # --------------------------------------------------------
 
-        status = (
-            "u_max = None\n"
-            "No consistent region exists.\n\n"
-            f"{opinion_message}"
-        )
+    add_filled_region(
+        fig=fig,
+        polygon=geometry["undecided_polygon"],
+        fillcolor="rgba(120,120,120,0.16)",
+        linecolor="rgba(120,120,120,0.35)",
+        name="undecided region",
+        visible=show_undecided,
+    )
 
-        fig.update_layout(
-            title=dict(text=title, x=0.5, xanchor="center"),
-            template="plotly_white",
-            showlegend=True,
-            margin=dict(l=40, r=40, t=110, b=150),
-            legend=dict(
-                orientation="h",
-                x=0.5,
-                y=-0.12,
-                xanchor="center",
-                yanchor="top",
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="rgba(0,0,0,0.25)",
-                borderwidth=1,
-                font=dict(size=12),
-            ),
-        )
+    add_filled_region(
+        fig=fig,
+        polygon=geometry["consistent_polygon"],
+        fillcolor="rgba(0,150,0,0.18)",
+        linecolor="rgba(0,100,0,0.55)",
+        name="confidently consistent region",
+        visible=show_consistent,
+    )
 
-        return fig, status
-
-    u_boundary = []
-    d_boundary = []
-    b_boundary = []
-
-    for u in np.linspace(0.0, u_max, n_boundary):
-        result = p_ok_boundary_for_u(
-            u=u,
-            eta=eta,
-            tau_ok=tau_ok,
-            a_prior=a_prior,
-        )
-
-        if result is None:
-            continue
-
-        if result == "all":
-            # Boundary is effectively the left edge b = 0.
-            b = 0.0
-            d = 1.0 - u
-        else:
-            p_boundary = result
-            b = p_boundary - a_prior * u
-            d = 1.0 - u - b
-
-        u_boundary.append(u)
-        d_boundary.append(d)
-        b_boundary.append(b)
-
-    u_boundary = np.asarray(u_boundary)
-    d_boundary = np.asarray(d_boundary)
-    b_boundary = np.asarray(b_boundary)
-
-    # Polygon for the consistent region:
-    # boundary curve + right edge d = 0
-    poly_a = list(u_boundary)
-    poly_b = list(d_boundary)
-    poly_c = list(b_boundary)
-
-    edge_a = list(reversed(u_boundary))
-    edge_b = [0.0] * len(edge_a)
-    edge_c = [1.0 - u for u in edge_a]
-
-    poly_a = poly_a + edge_a
-    poly_b = poly_b + edge_b
-    poly_c = poly_c + edge_c
-
-    # Custom hover data:
-    # [belief, disbelief, uncertainty, projected probability]
-    custom_boundary = np.column_stack(
-        [
-            b_boundary,
-            d_boundary,
-            u_boundary,
-            b_boundary + a_prior * u_boundary,
-        ]
+    add_filled_region(
+        fig=fig,
+        polygon=geometry["inconsistent_polygon"],
+        fillcolor="rgba(200,0,0,0.16)",
+        linecolor="rgba(140,0,0,0.55)",
+        name="confidently inconsistent region",
+        visible=show_inconsistent,
     )
 
     # --------------------------------------------------------
-    # Filled consistent region
+    # Decision boundaries
     # --------------------------------------------------------
 
-    fig.add_trace(
-        go.Scatterternary(
-            a=poly_a,
-            b=poly_b,
-            c=poly_c,
-            mode="lines",
-            fill="toself",
-            fillcolor="rgba(0,0,0,0.08)",
-            line=dict(color="black", width=1),
-            name="consistent region",
-            hoverinfo="skip",
-        )
+    add_boundary_curve(
+        fig=fig,
+        boundary=geometry["consistent_boundary"],
+        linecolor="darkgreen",
+        dash="solid",
+        name="consistent boundary",
+        criterion="Pr(θ &gt; τ<sub>OK</sub> | ω) = η",
+        a_prior=a_prior,
+        visible=show_consistent,
     )
 
-    # --------------------------------------------------------
-    # Boundary line
-    # --------------------------------------------------------
-
-    fig.add_trace(
-        go.Scatterternary(
-            a=u_boundary,
-            b=d_boundary,
-            c=b_boundary,
-            mode="lines",
-            line=dict(color="black", width=3),
-            customdata=custom_boundary,
-            hovertemplate=(
-                "b = %{customdata[0]:.3f}<br>"
-                "d = %{customdata[1]:.3f}<br>"
-                "u = %{customdata[2]:.3f}<br>"
-                "P_OK = %{customdata[3]:.3f}"
-                "<extra></extra>"
-            ),
-            name="boundary",
-        )
+    add_boundary_curve(
+        fig=fig,
+        boundary=geometry["inconsistent_boundary"],
+        linecolor="darkred",
+        dash="solid",
+        name="inconsistent boundary",
+        criterion="Pr(θ &lt; τ<sub>OK</sub> | ω) = η",
+        a_prior=a_prior,
+        visible=show_inconsistent,
     )
 
     # --------------------------------------------------------
@@ -413,15 +771,21 @@ def make_figure(
     if opinion_valid:
         p_ok_ex = b_ex + a_prior * u_ex
 
-        q_ex = q_consistent(
+        decision_state, q_ok_ex, q_not_ok_ex = classify_opinion(
             b=b_ex,
             d=d_ex,
             u=u_ex,
-            a_prior=a_prior,
+            eta=eta,
             tau_ok=tau_ok,
+            a_prior=a_prior,
         )
 
-        is_consistent = q_ex >= eta
+        if decision_state == "confidently consistent":
+            marker_color = "darkgreen"
+        elif decision_state == "confidently inconsistent":
+            marker_color = "darkred"
+        else:
+            marker_color = "black"
 
         fig.add_trace(
             go.Scatterternary(
@@ -430,22 +794,26 @@ def make_figure(
                 c=[b_ex],
                 mode="markers+text",
                 marker=dict(
-                    size=10,
-                    color="black" if is_consistent else "red",
+                    size=11,
+                    color=marker_color,
                     symbol="circle",
                 ),
                 text=[r"$\omega_X$"],
                 textposition="top center",
-                customdata=np.array([[b_ex, d_ex, u_ex, p_ok_ex, q_ex]]),
+                customdata=np.array(
+                    [[b_ex, d_ex, u_ex, p_ok_ex, q_ok_ex, q_not_ok_ex, decision_state]]
+                ),
                 hovertemplate=(
-                    "b_X = %{customdata[0]:.3f}<br>"
-                    "d_X = %{customdata[1]:.3f}<br>"
-                    "u_X = %{customdata[2]:.3f}<br>"
-                    "P_OK,X = %{customdata[3]:.3f}<br>"
-                    "q_X = Pr(p_OK > tau_OK | omega_X) = %{customdata[4]:.3f}"
+                    "b<sub>X</sub> = %{customdata[0]:.3f}<br>"
+                    "d<sub>X</sub> = %{customdata[1]:.3f}<br>"
+                    "u<sub>X</sub> = %{customdata[2]:.3f}<br>"
+                    "P<sub>OK,X</sub> = %{customdata[3]:.3f}<br>"
+                    "Pr(θ &gt; τ<sub>OK</sub> | ω<sub>X</sub>) = %{customdata[4]:.3f}<br>"
+                    "Pr(θ &lt; τ<sub>OK</sub> | ω<sub>X</sub>) = %{customdata[5]:.3f}<br>"
+                    "Decision: %{customdata[6]}"
                     "<extra></extra>"
                 ),
-                name=rf"omega_X: q_X={q_ex:.3f}",
+                name=f"omega_X: {decision_state}",
             )
         )
 
@@ -453,8 +821,9 @@ def make_figure(
             f"{opinion_message}\n"
             f"omega_X = (b_X={b_ex:.3f}, d_X={d_ex:.3f}, u_X={u_ex:.3f})\n"
             f"P_OK,X = b_X + a_prior * u_X = {p_ok_ex:.3f}\n"
-            f"q_X = Pr(p_OK > tau_OK | omega_X) = {q_ex:.3f}\n"
-            f"consistent: {is_consistent}"
+            f"Pr(theta > tau_OK | omega_X) = {q_ok_ex:.3f}\n"
+            f"Pr(theta < tau_OK | omega_X) = {q_not_ok_ex:.3f}\n"
+            f"Decision state: {decision_state}"
         )
 
     else:
@@ -464,14 +833,12 @@ def make_figure(
         )
 
     title = (
-        r"$\Pr\!\left(p_{\mathrm{OK}} > "
-        rf"\tau_{{\mathrm{{OK}}}}\mid\omega\right) \geq \eta"
+        r"$\text{Beta-credible decision regions for binomial opinions}"
         rf"\quad "
         rf"\left("
         rf"\eta={eta:.3f},\ "
         rf"\tau_{{\mathrm{{OK}}}}={tau_ok:.3f},\ "
-        rf"a={a_prior:.3f},\ "
-        rf"u_{{\max}}={u_max:.3f}"
+        rf"a={a_prior:.3f}"
         rf"\right)$"
     )
 
@@ -540,10 +907,16 @@ def make_figure(
         ),
     )
 
+    u_max_ok_text = "None" if u_max_ok is None else f"{u_max_ok:.6f}"
+    u_max_not_ok_text = "None" if u_max_not_ok is None else f"{u_max_not_ok:.6f}"
+
     status = (
-        f"u_max = {u_max:.6f}\n"
-        f"Boundary points = {len(u_boundary)}\n"
         f"eta = {eta:.3f}, tau_OK = {tau_ok:.3f}, a_prior = {a_prior:.3f}\n"
+        f"u_max for confidently consistent decision = {u_max_ok_text}\n"
+        f"u_max for confidently inconsistent decision = {u_max_not_ok_text}\n"
+        f"consistent boundary points = {geometry['n_consistent_boundary']}\n"
+        f"inconsistent boundary points = {geometry['n_inconsistent_boundary']}\n"
+        f"undecided polygon points = {geometry['n_undecided_polygon']}\n"
         "\n"
         f"{example_status}"
     )
@@ -569,21 +942,43 @@ app.layout = html.Div(
             r"""
 ## Interactive Opinion Triangle
 
-The displayed set is
+The ternary plot shows beta-credible decision regions for a binomial
+subjective-logic opinion
+
+$$
+\omega=(b,d,u,a),
+\qquad b+d+u=1.
+$$
+
+The consistent decision region is
 
 $$
 \mathcal{C}_{\eta,\tau_{\mathrm{OK}},a}
 =
 \left\{
-\omega=(b,d,u,a)
+\omega
 \;\middle|\;
-\Pr\!\left(p_{\mathrm{OK}}>\tau_{\mathrm{OK}}\mid\omega\right)
+\Pr\!\left(\theta>\tau_{\mathrm{OK}}\mid\omega\right)
+\geq
+\eta
+\right\},
+$$
+
+and the inconsistent decision region is
+
+$$
+\mathcal{I}_{\eta,\tau_{\mathrm{OK}},a}
+=
+\left\{
+\omega
+\;\middle|\;
+\Pr\!\left(\theta<\tau_{\mathrm{OK}}\mid\omega\right)
 \geq
 \eta
 \right\}.
 $$
 
-The ternary axes are
+The remaining part of the triangle is the undecided region. The ternary axes are
 
 $$
 a_{\mathrm{axis}} = u,\qquad
@@ -595,7 +990,7 @@ $$
         ),
 
         # ----------------------------------------------------
-        # Region sliders ABOVE the triangle
+        # Region sliders and display options ABOVE the triangle
         # ----------------------------------------------------
 
         html.Div(
@@ -675,6 +1070,28 @@ $$
 
                 html.Br(),
 
+                html.H4("Displayed regions"),
+                dcc.Checklist(
+                    id="region-toggle",
+                    options=[
+                        {
+                            "label": "Show confidently consistent region",
+                            "value": "consistent",
+                        },
+                        {
+                            "label": "Show confidently inconsistent region",
+                            "value": "inconsistent",
+                        },
+                        {
+                            "label": "Show undecided region",
+                            "value": "undecided",
+                        },
+                    ],
+                    value=DEFAULTS["visible_regions"],
+                    inputStyle={"marginRight": "8px"},
+                    labelStyle={"display": "block", "marginBottom": "6px"},
+                ),
+
                 html.Button(
                     "Reset parameters",
                     id="reset-button",
@@ -728,13 +1145,17 @@ The example opinion is defined by
 $$
 \omega_X = (b_X,d_X,u_X,a),
 \qquad
-d_X = 1 - b_X - u_X.
+ d_X = 1 - b_X - u_X.
 $$
 
 Validity condition:
 
 $$
-b_X \geq 0,\qquad u_X \geq 0,\qquad b_X+u_X \leq 1.
+b_X \geq 0,
+\qquad
+u_X \geq 0,
+\qquad
+b_X+u_X \leq 1.
 $$
                     """,
                     mathjax=True,
@@ -819,6 +1240,7 @@ $$
     Input("a-prior-slider", "value"),
     Input("b-ex-slider", "value"),
     Input("u-ex-slider", "value"),
+    Input("region-toggle", "value"),
     Input("reset-button", "n_clicks"),
 )
 def update_opinion_triangle(
@@ -827,6 +1249,7 @@ def update_opinion_triangle(
     a_prior: float,
     b_ex: float,
     u_ex: float,
+    visible_regions: list[str],
     reset_clicks: int,
 ):
     triggered = ctx.triggered_id
@@ -844,6 +1267,7 @@ def update_opinion_triangle(
             a_prior=a_prior,
             b_ex_raw=b_ex,
             u_ex_raw=u_ex,
+            visible_regions=visible_regions,
         )
 
         return (
@@ -862,6 +1286,7 @@ def update_opinion_triangle(
         a_prior=a_prior,
         b_ex_raw=b_ex,
         u_ex_raw=u_ex,
+        visible_regions=visible_regions,
     )
 
     return (
