@@ -624,6 +624,19 @@ nis = NIS(window_length=nis_settings["window_length"],
           dim=nis_settings["dim_meas"])
 nis_measures_history = []
 
+# ------------------------------------------------------------------
+# Beta-credible decision regions for the fused overall opinion
+# ------------------------------------------------------------------
+# eta controls the required posterior credibility.
+# tau_ok controls the required latent consistency probability.
+# The base rate a is intentionally not hard-coded here. It is read from
+# the fused overall opinion after the SL fusion has been performed.
+CREDIBLE_REGION_SETTINGS = {
+    "eta": 0.95,
+    "tau_ok": 0.50,
+    "n_boundary": 240,
+}
+
 def calibrate_entropy_threshold(W, n_s, alpha=0.05, N=10000):
     vals = []
     for _ in range(N):
@@ -846,6 +859,496 @@ def multinomial_opinion_to_binomial_ok_opinion(op, W, prior_ok=0.5, eps=1e-12):
     op_ok.prior_belief_masses = [prior_ok, 1.0 - prior_ok]
     return op_ok
 
+
+# ============================================================
+# Beta-credible decision regions for binomial SL opinions
+# ============================================================
+
+REGION_CONFIDENTLY_CONSISTENT = "Confidently consistent"
+REGION_UNDECIDED = "Undecided"
+REGION_CONFIDENTLY_INCONSISTENT = "Confidently inconsistent"
+
+REGION_CODE = {
+    REGION_CONFIDENTLY_INCONSISTENT: -1,
+    REGION_UNDECIDED: 0,
+    REGION_CONFIDENTLY_CONSISTENT: 1,
+}
+
+REGION_MARKER_COLOR = {
+    REGION_CONFIDENTLY_INCONSISTENT: "darkred",
+    REGION_UNDECIDED: "black",
+    REGION_CONFIDENTLY_CONSISTENT: "darkgreen",
+}
+
+
+@dataclass(frozen=True)
+class CredibleRegionAssessment:
+    """Per-time-step decision-region result for one binomial opinion."""
+
+    time_step: int
+    belief: float
+    disbelief: float
+    uncertainty: float
+    base_rate: float
+    projected_probability: float
+    probability_consistent: float
+    probability_inconsistent: float
+    region: str
+    region_code: int
+
+
+def validate_credible_region_parameters(
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+) -> None:
+    """Validates the parameters used by the beta-credible decision rule."""
+    if not (0.5 < eta < 1.0):
+        raise ValueError(
+            "eta must be in (0.5, 1.0) so that the positive and negative "
+            "credible decision regions are disjoint."
+        )
+
+    if not (0.0 < tau_ok < 1.0):
+        raise ValueError("tau_ok must be in (0, 1).")
+
+    if not (0.0 < a_prior < 1.0):
+        raise ValueError("The positive base rate a_prior must be in (0, 1).")
+
+
+def beta_parameters_from_binomial_opinion(
+    belief: float,
+    disbelief: float,
+    uncertainty: float,
+    a_prior: float,
+    eps: float = 1e-12,
+) -> tuple[float, float]:
+    """
+    Returns the beta parameters induced by a binomial SL opinion.
+
+    For the standard binomial prior weight W=2,
+
+        alpha = 2 b / u + 2 a,
+        beta  = 2 d / u + 2 (1-a).
+
+    Dogmatic opinions (u=0) are handled by the caller as a limit case.
+    """
+    if uncertainty <= eps:
+        raise ValueError(
+            "A dogmatic opinion has no finite beta evidence parameters. "
+            "Use the limiting decision rule instead."
+        )
+
+    alpha = 2.0 * belief / uncertainty + 2.0 * a_prior
+    beta_param = 2.0 * disbelief / uncertainty + 2.0 * (1.0 - a_prior)
+
+    return float(alpha), float(beta_param)
+
+
+def beta_credible_probabilities(
+    belief: float,
+    disbelief: float,
+    uncertainty: float,
+    a_prior: float,
+    tau_ok: float,
+    eps: float = 1e-12,
+) -> tuple[float, float]:
+    """
+    Computes the posterior probabilities on either side of tau_ok:
+
+        q_consistent   = Pr(theta > tau_ok | omega),
+        q_inconsistent = Pr(theta < tau_ok | omega).
+
+    theta is the latent probability of the positive proposition
+    "consistent" represented by the beta distribution induced by omega.
+    """
+    values = np.asarray([belief, disbelief, uncertainty], dtype=float)
+    if np.any(values < -1e-9):
+        raise ValueError(
+            f"Invalid opinion masses (b, d, u)={tuple(values)}: "
+            "all masses must be non-negative."
+        )
+
+    if not np.isclose(values.sum(), 1.0, atol=1e-7):
+        raise ValueError(
+            f"Invalid opinion masses (b, d, u)={tuple(values)}: "
+            "the masses must sum to one."
+        )
+
+    belief, disbelief, uncertainty = np.clip(values, 0.0, 1.0)
+
+    # Limiting rule for a dogmatic opinion. In this limit, the beta density
+    # collapses at the projected probability, which equals belief for u=0.
+    if uncertainty <= eps:
+        projected_probability = belief + a_prior * uncertainty
+        if projected_probability > tau_ok:
+            return 1.0, 0.0
+        if projected_probability < tau_ok:
+            return 0.0, 1.0
+        return 0.5, 0.5
+
+    alpha, beta_param = beta_parameters_from_binomial_opinion(
+        belief=belief,
+        disbelief=disbelief,
+        uncertainty=uncertainty,
+        a_prior=a_prior,
+    )
+
+    probability_inconsistent = float(beta.cdf(tau_ok, alpha, beta_param))
+    probability_consistent = float(beta.sf(tau_ok, alpha, beta_param))
+
+    # Numerical protection. For a continuous beta distribution, both values
+    # should add up to one.
+    probability_consistent = float(np.clip(probability_consistent, 0.0, 1.0))
+    probability_inconsistent = float(np.clip(probability_inconsistent, 0.0, 1.0))
+
+    return probability_consistent, probability_inconsistent
+
+
+def classify_binomial_opinion_values(
+    belief: float,
+    disbelief: float,
+    uncertainty: float,
+    a_prior: float,
+    eta: float,
+    tau_ok: float,
+) -> tuple[str, int, float, float]:
+    """Classifies one opinion into consistent, inconsistent, or undecided."""
+    validate_credible_region_parameters(
+        eta=eta,
+        tau_ok=tau_ok,
+        a_prior=a_prior,
+    )
+
+    probability_consistent, probability_inconsistent = beta_credible_probabilities(
+        belief=belief,
+        disbelief=disbelief,
+        uncertainty=uncertainty,
+        a_prior=a_prior,
+        tau_ok=tau_ok,
+    )
+
+    if probability_consistent >= eta:
+        region = REGION_CONFIDENTLY_CONSISTENT
+    elif probability_inconsistent >= eta:
+        region = REGION_CONFIDENTLY_INCONSISTENT
+    else:
+        region = REGION_UNDECIDED
+
+    return (
+        region,
+        REGION_CODE[region],
+        probability_consistent,
+        probability_inconsistent,
+    )
+
+
+def positive_base_rate_from_opinion(opinion) -> float:
+    """Returns the base rate of the positive proposition of an SL opinion."""
+    base_rates = np.asarray(opinion.prior_belief_masses, dtype=float).reshape(-1)
+    if base_rates.size != 2:
+        raise ValueError(
+            "The credible-region mapping requires a binomial opinion with "
+            "exactly two base rates."
+        )
+    return float(base_rates[0])
+
+
+def assess_overall_opinion_regions(
+    opinions,
+    eta: float,
+    tau_ok: float,
+) -> list[CredibleRegionAssessment]:
+    """Evaluates the credible decision region of every overall opinion."""
+    if not opinions:
+        return []
+
+    base_rates = np.asarray(
+        [positive_base_rate_from_opinion(opinion) for opinion in opinions],
+        dtype=float,
+    )
+
+    if not np.allclose(base_rates, base_rates[0], atol=1e-10, rtol=0.0):
+        raise ValueError(
+            "The fused overall opinions do not use a constant base rate. "
+            "A single static decision-region geometry therefore cannot be "
+            "used for the complete time series."
+        )
+
+    a_prior = float(base_rates[0])
+    validate_credible_region_parameters(
+        eta=eta,
+        tau_ok=tau_ok,
+        a_prior=a_prior,
+    )
+
+    assessments: list[CredibleRegionAssessment] = []
+
+    for time_step, opinion in enumerate(opinions):
+        belief = float(opinion.belief())
+        disbelief = float(opinion.disbelief())
+        uncertainty = float(opinion.uncertainty())
+
+        region, region_code, probability_consistent, probability_inconsistent = (
+            classify_binomial_opinion_values(
+                belief=belief,
+                disbelief=disbelief,
+                uncertainty=uncertainty,
+                a_prior=a_prior,
+                eta=eta,
+                tau_ok=tau_ok,
+            )
+        )
+
+        projected_probability = belief + a_prior * uncertainty
+
+        assessments.append(
+            CredibleRegionAssessment(
+                time_step=time_step,
+                belief=belief,
+                disbelief=disbelief,
+                uncertainty=uncertainty,
+                base_rate=a_prior,
+                projected_probability=float(projected_probability),
+                probability_consistent=probability_consistent,
+                probability_inconsistent=probability_inconsistent,
+                region=region,
+                region_code=region_code,
+            )
+        )
+
+    return assessments
+
+
+def feasible_projected_probability_interval(
+    uncertainty: float,
+    a_prior: float,
+) -> tuple[float, float]:
+    """Feasible interval of P_OK=b+a*u for one fixed uncertainty u."""
+    p_low = a_prior * uncertainty
+    p_high = 1.0 - (1.0 - a_prior) * uncertainty
+    return float(p_low), float(p_high)
+
+
+def opinion_from_uncertainty_and_projection(
+    uncertainty: float,
+    projected_probability: float,
+    a_prior: float,
+) -> tuple[float, float, float]:
+    """Returns (b, d, u) for fixed u and projected probability."""
+    belief = projected_probability - a_prior * uncertainty
+    disbelief = 1.0 - uncertainty - belief
+
+    belief = float(np.clip(belief, 0.0, 1.0))
+    disbelief = float(np.clip(disbelief, 0.0, 1.0))
+    uncertainty = float(np.clip(uncertainty, 0.0, 1.0))
+
+    return belief, disbelief, uncertainty
+
+
+def projected_probability_boundary_for_uncertainty(
+    uncertainty: float,
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+    side: str,
+) -> float | str | None:
+    """
+    Finds the decision boundary on a fixed-u slice of the opinion triangle.
+
+    Returns a projected probability, "all" if the complete slice satisfies
+    the selected decision, or None if no point on the slice satisfies it.
+    """
+    eps = 1e-10
+    uncertainty = float(uncertainty)
+
+    if uncertainty <= eps:
+        return float(tau_ok)
+
+    p_low, p_high = feasible_projected_probability_interval(
+        uncertainty=uncertainty,
+        a_prior=a_prior,
+    )
+
+    def selected_probability(projected_probability: float) -> float:
+        belief, disbelief, u_local = opinion_from_uncertainty_and_projection(
+            uncertainty=uncertainty,
+            projected_probability=projected_probability,
+            a_prior=a_prior,
+        )
+        probability_consistent, probability_inconsistent = beta_credible_probabilities(
+            belief=belief,
+            disbelief=disbelief,
+            uncertainty=u_local,
+            a_prior=a_prior,
+            tau_ok=tau_ok,
+        )
+
+        if side == "consistent":
+            return probability_consistent
+        if side == "inconsistent":
+            return probability_inconsistent
+        raise ValueError(f"Unknown decision-boundary side: {side}")
+
+    lower_value = selected_probability(p_low + eps) - eta
+    upper_value = selected_probability(p_high - eps) - eta
+
+    if side == "consistent":
+        # Pr(theta > tau_ok) increases with projected probability.
+        if upper_value < 0.0:
+            return None
+        if lower_value >= 0.0:
+            return "all"
+    else:
+        # Pr(theta < tau_ok) decreases with projected probability.
+        if lower_value < 0.0:
+            return None
+        if upper_value >= 0.0:
+            return "all"
+
+    return float(
+        brentq(
+            lambda projected_probability: (
+                selected_probability(projected_probability) - eta
+            ),
+            p_low + eps,
+            p_high - eps,
+        )
+    )
+
+
+def compute_credible_region_geometry(
+    eta: float,
+    tau_ok: float,
+    a_prior: float,
+    n_boundary: int = 240,
+) -> dict[str, list[tuple[float, float, float]]]:
+    """Computes boundaries and filled ternary polygons for all regions."""
+    validate_credible_region_parameters(
+        eta=eta,
+        tau_ok=tau_ok,
+        a_prior=a_prior,
+    )
+
+    consistent_boundary: list[tuple[float, float, float]] = []
+    inconsistent_boundary: list[tuple[float, float, float]] = []
+    undecided_lower: list[tuple[float, float, float]] = []
+    undecided_upper: list[tuple[float, float, float]] = []
+
+    for uncertainty in np.linspace(0.0, 1.0, n_boundary):
+        p_low, p_high = feasible_projected_probability_interval(
+            uncertainty=uncertainty,
+            a_prior=a_prior,
+        )
+
+        consistent_result = projected_probability_boundary_for_uncertainty(
+            uncertainty=uncertainty,
+            eta=eta,
+            tau_ok=tau_ok,
+            a_prior=a_prior,
+            side="consistent",
+        )
+
+        if consistent_result is None:
+            consistent_limit = p_high
+        elif consistent_result == "all":
+            consistent_limit = p_low
+            consistent_boundary.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=p_low,
+                    a_prior=a_prior,
+                )
+            )
+        else:
+            consistent_limit = float(consistent_result)
+            consistent_boundary.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=consistent_limit,
+                    a_prior=a_prior,
+                )
+            )
+
+        inconsistent_result = projected_probability_boundary_for_uncertainty(
+            uncertainty=uncertainty,
+            eta=eta,
+            tau_ok=tau_ok,
+            a_prior=a_prior,
+            side="inconsistent",
+        )
+
+        if inconsistent_result is None:
+            inconsistent_limit = p_low
+        elif inconsistent_result == "all":
+            inconsistent_limit = p_high
+            inconsistent_boundary.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=p_high,
+                    a_prior=a_prior,
+                )
+            )
+        else:
+            inconsistent_limit = float(inconsistent_result)
+            inconsistent_boundary.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=inconsistent_limit,
+                    a_prior=a_prior,
+                )
+            )
+
+        if inconsistent_limit + 1e-9 < consistent_limit:
+            undecided_lower.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=inconsistent_limit,
+                    a_prior=a_prior,
+                )
+            )
+            undecided_upper.append(
+                opinion_from_uncertainty_and_projection(
+                    uncertainty=uncertainty,
+                    projected_probability=consistent_limit,
+                    a_prior=a_prior,
+                )
+            )
+
+    consistent_polygon = list(consistent_boundary)
+    consistent_polygon.extend(
+        (1.0 - uncertainty, 0.0, uncertainty)
+        for _, _, uncertainty in reversed(consistent_boundary)
+    )
+
+    inconsistent_polygon = list(inconsistent_boundary)
+    inconsistent_polygon.extend(
+        (0.0, 1.0 - uncertainty, uncertainty)
+        for _, _, uncertainty in reversed(inconsistent_boundary)
+    )
+
+    undecided_polygon = list(undecided_lower)
+    undecided_polygon.extend(reversed(undecided_upper))
+
+    return {
+        "consistent_boundary": consistent_boundary,
+        "inconsistent_boundary": inconsistent_boundary,
+        "consistent_polygon": consistent_polygon,
+        "inconsistent_polygon": inconsistent_polygon,
+        "undecided_polygon": undecided_polygon,
+    }
+
+
+def ternary_values_from_opinion_points(
+    points: list[tuple[float, float, float]],
+) -> tuple[list[float], list[float], list[float]]:
+    """Maps (b, d, u) points to Plotly's ternary axes (a=u, b=d, c=b)."""
+    uncertainty = [point[2] for point in points]
+    disbelief = [point[1] for point in points]
+    belief = [point[0] for point in points]
+    return uncertainty, disbelief, belief
+
+
 def bar_shalom_realtime_whiteness_pit(
     innovation_buffer,
     lag=1,
@@ -938,6 +1441,7 @@ from subjective_logic.draw_sl_opinions import *
 from stonesoup.types.track import Track
 from stonesoup.types.groundtruth import GroundTruthPath
 from scipy.stats import chi2, beta
+from scipy.optimize import brentq
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import scipy.linalg
@@ -1664,6 +2168,47 @@ for i, ops in enumerate(zip(component_x_buffered, component_y_buffered)):
     p_ok_comp.append(component_binomial[-1].getProjection()[0])
     p_ok_overall.append(overall_op.getProjection()[0])
 
+# ------------------------------------------------------------------
+# Beta-credible region classification of the fused overall opinion
+# ------------------------------------------------------------------
+overall_region_assessments = assess_overall_opinion_regions(
+    opinions=overall_binomial,
+    eta=CREDIBLE_REGION_SETTINGS["eta"],
+    tau_ok=CREDIBLE_REGION_SETTINGS["tau_ok"],
+)
+
+overall_region_history = [assessment.region for assessment in overall_region_assessments]
+overall_region_code_history = [assessment.region_code for assessment in overall_region_assessments]
+overall_probability_consistent_history = [
+    assessment.probability_consistent for assessment in overall_region_assessments
+]
+overall_probability_inconsistent_history = [
+    assessment.probability_inconsistent for assessment in overall_region_assessments
+]
+
+overall_decision_base_rate = overall_region_assessments[0].base_rate
+overall_credible_region_geometry = compute_credible_region_geometry(
+    eta=CREDIBLE_REGION_SETTINGS["eta"],
+    tau_ok=CREDIBLE_REGION_SETTINGS["tau_ok"],
+    a_prior=overall_decision_base_rate,
+    n_boundary=CREDIBLE_REGION_SETTINGS["n_boundary"],
+)
+
+region_counts = {
+    region: overall_region_history.count(region)
+    for region in (
+        REGION_CONFIDENTLY_CONSISTENT,
+        REGION_UNDECIDED,
+        REGION_CONFIDENTLY_INCONSISTENT,
+    )
+}
+print(
+    "Overall beta-credible decision regions "
+    f"(eta={CREDIBLE_REGION_SETTINGS['eta']:.3f}, "
+    f"tau_OK={CREDIBLE_REGION_SETTINGS['tau_ok']:.3f}, "
+    f"a={overall_decision_base_rate:.3f}): {region_counts}"
+)
+
 prior_white = float(np.sqrt(0.5))
 
 for opwx, opwy in zip(whiteness_x_buffered, whiteness_y_buffered):
@@ -1744,6 +2289,75 @@ plt.plot([component_binomial[i].uncertainty() for i in range(len(component_binom
 plt.legend()
 plt.grid()
 plt.title("Griebel Baseline vs Own Method")
+
+# ------------------------------------------------------------------
+# Beta-credible probabilities and discrete region changes over time
+# ------------------------------------------------------------------
+fig_regions, (ax_credibility, ax_region) = plt.subplots(
+    2,
+    1,
+    sharex=True,
+    figsize=(12, 6),
+    gridspec_kw={"height_ratios": [2, 1]},
+)
+
+time_steps_regions = np.arange(len(overall_region_assessments))
+eta_decision = CREDIBLE_REGION_SETTINGS["eta"]
+tau_ok_decision = CREDIBLE_REGION_SETTINGS["tau_ok"]
+
+ax_credibility.plot(
+    time_steps_regions,
+    overall_probability_consistent_history,
+    label=r"$\Pr(\theta > \tau_{\mathrm{OK}}\mid\omega_k^{\mathrm{overall}})$",
+    color="darkgreen",
+)
+ax_credibility.plot(
+    time_steps_regions,
+    overall_probability_inconsistent_history,
+    label=r"$\Pr(\theta < \tau_{\mathrm{OK}}\mid\omega_k^{\mathrm{overall}})$",
+    color="darkred",
+)
+ax_credibility.axhline(
+    eta_decision,
+    color="black",
+    linestyle="--",
+    linewidth=1.2,
+    label=rf"$\eta={eta_decision:.2f}$",
+)
+ax_credibility.set_ylabel("Posterior probability")
+ax_credibility.set_ylim(-0.02, 1.02)
+ax_credibility.grid(True)
+ax_credibility.legend(loc="best")
+ax_credibility.set_title(
+    rf"Beta-credible classification of the overall opinion "
+    rf"$(\tau_{{\mathrm{{OK}}}}={tau_ok_decision:.2f},\ "
+    rf"a={overall_decision_base_rate:.2f})$"
+)
+
+ax_region.axhspan(0.5, 1.5, color="green", alpha=0.10)
+ax_region.axhspan(-0.5, 0.5, color="gray", alpha=0.12)
+ax_region.axhspan(-1.5, -0.5, color="red", alpha=0.10)
+ax_region.step(
+    time_steps_regions,
+    overall_region_code_history,
+    where="post",
+    color="black",
+    linewidth=1.8,
+)
+ax_region.set_yticks(
+    [-1, 0, 1],
+    [
+        "Confidently\ninconsistent",
+        "Undecided",
+        "Confidently\nconsistent",
+    ],
+)
+ax_region.set_ylim(-1.5, 1.5)
+ax_region.set_xlabel("Time step $k$")
+ax_region.set_ylabel("Decision region")
+ax_region.grid(True, axis="x")
+
+fig_regions.tight_layout()
 
 # plt.figure()
 # plt.plot(p_ok_white_x, label=r"$P_{OK,\mathrm{white},x}$")
@@ -2854,7 +3468,7 @@ fig.set_subplots(
         [None,                          None,                   None,                   {"type": "xy"},         {"type": "xy"}      ]
     ],
     subplot_titles=[
-        "Track", "Overall Opinion vs Griebel",
+        "Track", "Overall Opinion and Beta-Credible Regions",
         # "H1 Opinion", "H2 Opinion",
         "Radial and Comps",
         "X and Y Comp",# "H5 Opinion",
@@ -2870,6 +3484,7 @@ for trace in fig.data:
 
 b0_f, d0_f, u0_f = overall_binomial[0].belief(), overall_binomial[0].disbelief(), overall_binomial[0].uncertainty()
 b0_f2, d0_f2, u0_f2 = fused_2_op_obj_history[0].belief(), fused_2_op_obj_history[0].disbelief(), fused_2_op_obj_history[0].uncertainty()
+initial_region_assessment = overall_region_assessments[0]
 fig.add_trace(
     go.Scatterternary(
         a=[u0_f, u0_f2],
@@ -2877,8 +3492,27 @@ fig.add_trace(
         c=[b0_f, b0_f2],
 
         mode='markers',
-        marker=dict(size=[14, 14], color=['purple', 'cyan']),
-        hovertemplate=["Overall<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>", "Griebel<br>b: %{c:.2f}<br>d: %{b:.2f}<br>u: %{a:.2f}<extra></extra>"],
+        marker=dict(
+            size=[14, 14],
+            color=[REGION_MARKER_COLOR[initial_region_assessment.region], 'cyan'],
+        ),
+        customdata=[
+            [
+                initial_region_assessment.probability_consistent,
+                initial_region_assessment.probability_inconsistent,
+                initial_region_assessment.region,
+            ],
+            [np.nan, np.nan, "Griebel baseline"],
+        ],
+        hovertemplate=[
+            "Overall<br>"
+            "b: %{c:.3f}<br>d: %{b:.3f}<br>u: %{a:.3f}<br>"
+            "Pr(theta &gt; tau_OK | omega): %{customdata[0]:.3f}<br>"
+            "Pr(theta &lt; tau_OK | omega): %{customdata[1]:.3f}<br>"
+            "Region: %{customdata[2]}<extra></extra>",
+            "Griebel<br>b: %{c:.3f}<br>d: %{b:.3f}<br>u: %{a:.3f}"
+            "<extra></extra>",
+        ],
         name="Overall/Griebel"
     ),
     row=1, col=4
@@ -3149,11 +3783,39 @@ for i, frame in enumerate(fig.frames):
     # Bestehende Daten behalten + erweitern
     new_data = list(frame.data)
 
+    current_region_assessment = overall_region_assessments[i]
     new_data.append(
-        go.Scatterternary(a=[u_f, u_f2],
-                          b=[d_f, d_f2],
-                          c=[b_f, b_f2],
-                          cliponaxis=False)
+        go.Scatterternary(
+            a=[u_f, u_f2],
+            b=[d_f, d_f2],
+            c=[b_f, b_f2],
+            mode="markers",
+            marker=dict(
+                size=[14, 14],
+                color=[
+                    REGION_MARKER_COLOR[current_region_assessment.region],
+                    "cyan",
+                ],
+            ),
+            customdata=[
+                [
+                    current_region_assessment.probability_consistent,
+                    current_region_assessment.probability_inconsistent,
+                    current_region_assessment.region,
+                ],
+                [np.nan, np.nan, "Griebel baseline"],
+            ],
+            hovertemplate=[
+                "Overall<br>"
+                "b: %{c:.3f}<br>d: %{b:.3f}<br>u: %{a:.3f}<br>"
+                "Pr(theta &gt; tau_OK | omega): %{customdata[0]:.3f}<br>"
+                "Pr(theta &lt; tau_OK | omega): %{customdata[1]:.3f}<br>"
+                "Region: %{customdata[2]}<extra></extra>",
+                "Griebel<br>b: %{c:.3f}<br>d: %{b:.3f}<br>u: %{a:.3f}"
+                "<extra></extra>",
+            ],
+            cliponaxis=False,
+        )
     )
 
     new_data.append(go.Scatterternary(a=[0], b=[1 - P], c=[P], cliponaxis=False))
@@ -3225,6 +3887,103 @@ for i, frame in enumerate(fig.frames):
     new_frames.append(go.Frame(data=new_data, name=frame.name))
 
 fig.frames = new_frames
+
+# ------------------------------------------------------------------
+# Static beta-credible decision regions in the overall opinion triangle
+# ------------------------------------------------------------------
+def add_credible_region_polygon_to_plotly(
+    figure,
+    points,
+    name,
+    fillcolor,
+    linecolor,
+):
+    if len(points) < 3:
+        return
+
+    uncertainty_values, disbelief_values, belief_values = (
+        ternary_values_from_opinion_points(points)
+    )
+
+    figure.add_trace(
+        go.Scatterternary(
+            a=uncertainty_values,
+            b=disbelief_values,
+            c=belief_values,
+            mode="lines",
+            fill="toself",
+            fillcolor=fillcolor,
+            line=dict(color=linecolor, width=1.3),
+            name=name,
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=4,
+    )
+
+
+def add_credible_region_boundary_to_plotly(
+    figure,
+    points,
+    name,
+    linecolor,
+):
+    if len(points) < 2:
+        return
+
+    uncertainty_values, disbelief_values, belief_values = (
+        ternary_values_from_opinion_points(points)
+    )
+
+    figure.add_trace(
+        go.Scatterternary(
+            a=uncertainty_values,
+            b=disbelief_values,
+            c=belief_values,
+            mode="lines",
+            line=dict(color=linecolor, width=2.4),
+            name=name,
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        row=1,
+        col=4,
+    )
+
+
+add_credible_region_polygon_to_plotly(
+    figure=fig,
+    points=overall_credible_region_geometry["undecided_polygon"],
+    name="Undecided region",
+    fillcolor="rgba(100,100,100,0.10)",
+    linecolor="rgba(80,80,80,0.35)",
+)
+add_credible_region_polygon_to_plotly(
+    figure=fig,
+    points=overall_credible_region_geometry["consistent_polygon"],
+    name="Confidently consistent region",
+    fillcolor="rgba(0,150,0,0.12)",
+    linecolor="rgba(0,100,0,0.55)",
+)
+add_credible_region_polygon_to_plotly(
+    figure=fig,
+    points=overall_credible_region_geometry["inconsistent_polygon"],
+    name="Confidently inconsistent region",
+    fillcolor="rgba(200,0,0,0.10)",
+    linecolor="rgba(140,0,0,0.55)",
+)
+add_credible_region_boundary_to_plotly(
+    figure=fig,
+    points=overall_credible_region_geometry["consistent_boundary"],
+    name="Consistent boundary",
+    linecolor="darkgreen",
+)
+add_credible_region_boundary_to_plotly(
+    figure=fig,
+    points=overall_credible_region_geometry["inconsistent_boundary"],
+    name="Inconsistent boundary",
+    linecolor="darkred",
+)
 
 # sliders = [dict(
 #     steps=[
