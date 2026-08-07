@@ -136,8 +136,10 @@ class ExperimentConfig:
     # Self-assessment
     W: int = 7
     short_window_size: int = 35
-    discount: float = 0.99
+    discount: float = 0.999
     alpha_threshold_dc: float = 0.01
+    handle_st_conflict: bool = True
+    avg_dc_conflict_handling: bool = True
     griebel_alpha: float = 0.05
     griebel_window_length: int = 35
     griebel_two_sided: bool = True
@@ -740,24 +742,24 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         threshold,
         config.discount,
         sl.FusionType.CUMULATIVE,
-        False,
-        False,
+        config.handle_st_conflict,
+        config.avg_dc_conflict_handling,
     )
     ltst_component_x = eval(f"sl.LongShortTermMemory{W}d")(
         config.short_window_size,
         threshold,
         config.discount,
         sl.FusionType.CUMULATIVE,
-        False,
-        False,
+        config.handle_st_conflict,
+        config.avg_dc_conflict_handling,
     )
     ltst_component_y = eval(f"sl.LongShortTermMemory{W}d")(
         config.short_window_size,
         threshold,
         config.discount,
         sl.FusionType.CUMULATIVE,
-        False,
-        False,
+        config.handle_st_conflict,
+        config.avg_dc_conflict_handling,
     )
 
     buffered_ops = []

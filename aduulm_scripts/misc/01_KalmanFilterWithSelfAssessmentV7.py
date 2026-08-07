@@ -632,10 +632,14 @@ nis_measures_history = []
 # The base rate a is intentionally not hard-coded here. It is read from
 # the fused overall opinion after the SL fusion has been performed.
 CREDIBLE_REGION_SETTINGS = {
-    "eta": 0.95,
+    "eta": 0.9,
     "tau_ok": 0.50,
     "n_boundary": 240,
 }
+
+# Plot an additional time-series classification for the individual
+# radial, x-component, and y-component channel opinions.
+PLOT_CHANNEL_REGION_TIMESERIES = True
 
 def calibrate_entropy_threshold(W, n_s, alpha=0.05, N=10000):
     vals = []
@@ -673,8 +677,8 @@ def calculate_lt_evidence(W: int, alpha=0.99):
 SHORT_WINDOW_SIZE = 35
 SHORT_WINDOW_SIZE_RADIAL = 20
 W = 7
-DISCOUNT = 0.99
-DISCOUNT_RADIAL = 0.9958
+DISCOUNT = 0.999
+# DISCOUNT_RADIAL = 0.9958
 
 import json
 with open("entropy_threshold.json", 'r') as f:
@@ -694,8 +698,8 @@ print("Threshold for LTST:", THRESHOLD)
 # FUSION_TYPE = sl.FusionType.AVERAGE
 FUSION_TYPE = sl.FusionType.CUMULATIVE
 # FUSION_TYPE = sl.FusionType.WEIGHTED
-HANDLE_ST_CONFLICT = False
-AVG_DC_CONFLICT_HANDLING = False
+HANDLE_ST_CONFLICT = True
+AVG_DC_CONFLICT_HANDLING = True
 
 ltst = eval(f"sl.LongShortTermMemory{W}d")(
     SHORT_WINDOW_SIZE, THRESHOLD, DISCOUNT, FUSION_TYPE, HANDLE_ST_CONFLICT, AVG_DC_CONFLICT_HANDLING
@@ -2209,6 +2213,70 @@ print(
     f"a={overall_decision_base_rate:.3f}): {region_counts}"
 )
 
+# ------------------------------------------------------------------
+# Beta-credible region classification of the individual channel opinions
+# ------------------------------------------------------------------
+# The radial channel is represented by global_op_history. The component-wise
+# channels are represented by component_x_binomial and component_y_binomial.
+# Each channel is assessed with its own constant base rate as stored in the
+# corresponding binomial SL opinions.
+channel_binomial_opinions = {
+    "radial": global_op_history,
+    "x": component_x_binomial,
+    "y": component_y_binomial,
+}
+
+channel_region_assessments = {
+    channel_name: assess_overall_opinion_regions(
+        opinions=channel_opinions,
+        eta=CREDIBLE_REGION_SETTINGS["eta"],
+        tau_ok=CREDIBLE_REGION_SETTINGS["tau_ok"],
+    )
+    for channel_name, channel_opinions in channel_binomial_opinions.items()
+}
+
+channel_region_history = {
+    channel_name: [assessment.region for assessment in assessments]
+    for channel_name, assessments in channel_region_assessments.items()
+}
+channel_region_code_history = {
+    channel_name: [assessment.region_code for assessment in assessments]
+    for channel_name, assessments in channel_region_assessments.items()
+}
+channel_probability_consistent_history = {
+    channel_name: [
+        assessment.probability_consistent for assessment in assessments
+    ]
+    for channel_name, assessments in channel_region_assessments.items()
+}
+channel_probability_inconsistent_history = {
+    channel_name: [
+        assessment.probability_inconsistent for assessment in assessments
+    ]
+    for channel_name, assessments in channel_region_assessments.items()
+}
+channel_decision_base_rate = {
+    channel_name: assessments[0].base_rate
+    for channel_name, assessments in channel_region_assessments.items()
+}
+
+for channel_name, regions in channel_region_history.items():
+    channel_counts = {
+        region: regions.count(region)
+        for region in (
+            REGION_CONFIDENTLY_CONSISTENT,
+            REGION_UNDECIDED,
+            REGION_CONFIDENTLY_INCONSISTENT,
+        )
+    }
+    print(
+        f"{channel_name.capitalize()} channel beta-credible decision regions "
+        f"(eta={CREDIBLE_REGION_SETTINGS['eta']:.3f}, "
+        f"tau_OK={CREDIBLE_REGION_SETTINGS['tau_ok']:.3f}, "
+        f"a={channel_decision_base_rate[channel_name]:.3f}): "
+        f"{channel_counts}"
+    )
+
 prior_white = float(np.sqrt(0.5))
 
 for opwx, opwy in zip(whiteness_x_buffered, whiteness_y_buffered):
@@ -2358,6 +2426,119 @@ ax_region.set_ylabel("Decision region")
 ax_region.grid(True, axis="x")
 
 fig_regions.tight_layout()
+
+# ------------------------------------------------------------------
+# Beta-credible probabilities and region changes of the channel opinions
+# ------------------------------------------------------------------
+if PLOT_CHANNEL_REGION_TIMESERIES:
+    channel_plot_metadata = {
+        "radial": {
+            "title": r"Radial channel $\omega_k^{\mathrm{rad}}$",
+        },
+        "x": {
+            "title": r"Component channel $\omega_k^{(x)}$",
+        },
+        "y": {
+            "title": r"Component channel $\omega_k^{(y)}$",
+        },
+    }
+
+    fig_channel_regions, channel_axes = plt.subplots(
+        2,
+        3,
+        sharex="col",
+        figsize=(17, 6.5),
+        gridspec_kw={"height_ratios": [2, 1]},
+    )
+
+    for column_index, channel_name in enumerate(("radial", "x", "y")):
+        assessments = channel_region_assessments[channel_name]
+        time_steps_channel = np.arange(len(assessments))
+        ax_channel_credibility = channel_axes[0, column_index]
+        ax_channel_region = channel_axes[1, column_index]
+
+        ax_channel_credibility.plot(
+            time_steps_channel,
+            channel_probability_consistent_history[channel_name],
+            color="darkgreen",
+            linewidth=1.5,
+            label=(
+                r"$\Pr(\theta > \tau_{\mathrm{OK}}"
+                r"\mid\omega_k)$"
+            ),
+        )
+        ax_channel_credibility.plot(
+            time_steps_channel,
+            channel_probability_inconsistent_history[channel_name],
+            color="darkred",
+            linewidth=1.5,
+            label=(
+                r"$\Pr(\theta < \tau_{\mathrm{OK}}"
+                r"\mid\omega_k)$"
+            ),
+        )
+        ax_channel_credibility.axhline(
+            eta_decision,
+            color="black",
+            linestyle="--",
+            linewidth=1.2,
+            label=rf"$\eta={eta_decision:.2f}$",
+        )
+        ax_channel_credibility.set_ylim(-0.02, 1.02)
+        ax_channel_credibility.grid(True)
+        ax_channel_credibility.set_title(
+            channel_plot_metadata[channel_name]["title"]
+            + rf" $\left(a={channel_decision_base_rate[channel_name]:.2f}\right)$"
+        )
+
+        if column_index == 0:
+            ax_channel_credibility.set_ylabel("Posterior probability")
+
+        ax_channel_region.axhspan(0.5, 1.5, color="green", alpha=0.10)
+        ax_channel_region.axhspan(-0.5, 0.5, color="gray", alpha=0.12)
+        ax_channel_region.axhspan(-1.5, -0.5, color="red", alpha=0.10)
+        ax_channel_region.step(
+            time_steps_channel,
+            channel_region_code_history[channel_name],
+            where="post",
+            color="black",
+            linewidth=1.6,
+        )
+        ax_channel_region.set_yticks(
+            [-1, 0, 1],
+            [
+                "Confidently\ninconsistent",
+                "Undecided",
+                "Confidently\nconsistent",
+            ],
+        )
+        ax_channel_region.set_ylim(-1.5, 1.5)
+        ax_channel_region.set_xlabel(r"Time step $k$")
+        ax_channel_region.grid(True, axis="x")
+
+        if column_index == 0:
+            ax_channel_region.set_ylabel("Decision region")
+        else:
+            # Keep the numerical region positions aligned while reducing
+            # repeated labels in the two right-hand columns.
+            ax_channel_region.set_yticklabels([])
+
+    handles, labels = channel_axes[0, 0].get_legend_handles_labels()
+    fig_channel_regions.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.955),
+        ncol=3,
+        frameon=True,
+    )
+    fig_channel_regions.suptitle(
+        rf"Beta-credible classification of the channel opinions "
+        rf"$(\eta={eta_decision:.2f},\ "
+        rf"\tau_{{\mathrm{{OK}}}}={tau_ok_decision:.2f})$",
+        y=0.995,
+    )
+    fig_channel_regions.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
 
 # plt.figure()
 # plt.plot(p_ok_white_x, label=r"$P_{OK,\mathrm{white},x}$")
@@ -3985,6 +4166,117 @@ add_credible_region_boundary_to_plotly(
     linecolor="darkred",
 )
 
+
+# ------------------------------------------------------------------
+# Disturbance status tile for the Plotly animation
+# ------------------------------------------------------------------
+# Keep these intervals synchronized with the disturbance configuration
+# used above. The end index is exclusive, i.e. [start, end).
+DISTURBANCE_DISPLAY_INTERVALS = [
+    (100, 200, "Measurement outliers"),
+    (300, 400, "Increased measurement noise (x component)"),
+    (500, 600, "Decreased measurement noise (x and y components)"),
+    (700, 800, "Truncated-Gaussian measurement noise"),
+    (turn_start, turn_end, "Motion-model mismatch: coordinated turn"),
+    (1100, 1300, "Increased process noise (x component)"),
+]
+
+
+def get_active_disturbances(step: int) -> list[str]:
+    """Return all disturbances that are active at one simulation step."""
+    if not activate_disturbances:
+        return []
+
+    return [
+        label
+        for start, end, label in DISTURBANCE_DISPLAY_INTERVALS
+        if start <= step < end
+    ]
+
+
+def make_disturbance_status_annotation(step: int) -> dict:
+    """Create the green/red status tile shown in every animation frame."""
+    active_disturbances = get_active_disturbances(step)
+
+    if not activate_disturbances:
+        title = "DISTURBANCE STATUS"
+        status_text = "Disturbances disabled"
+        background_color = "rgba(70, 130, 180, 0.95)"
+        border_color = "rgb(45, 90, 125)"
+    elif active_disturbances:
+        title = "ACTIVE DISTURBANCE"
+        status_text = "<br>".join(active_disturbances)
+        background_color = "rgba(190, 35, 35, 0.96)"
+        border_color = "rgb(125, 15, 15)"
+    else:
+        title = "DISTURBANCE STATUS"
+        status_text = "Nominal operation"
+        background_color = "rgba(25, 145, 70, 0.96)"
+        border_color = "rgb(10, 95, 40)"
+
+    return dict(
+        x=0.285,
+        y=0.975,
+        xref="paper",
+        yref="paper",
+        xanchor="center",
+        yanchor="top",
+        text=(
+            f"<b>{title}</b><br>"
+            f"{status_text}<br>"
+            f"<span style='font-size:11px'>Step {step}</span>"
+        ),
+        showarrow=False,
+        align="center",
+        bgcolor=background_color,
+        bordercolor=border_color,
+        borderwidth=2,
+        borderpad=9,
+        font=dict(color="white", size=14),
+        opacity=1.0,
+    )
+
+
+def add_disturbance_status_to_animation(figure) -> None:
+    """
+    Add an initial status tile and update it in every animation frame.
+
+    Existing subplot-title annotations are copied into each frame so they
+    remain visible while the frame-specific status annotation is updated.
+    """
+    static_annotations = [
+        annotation.to_plotly_json()
+        for annotation in figure.layout.annotations
+    ]
+
+    initial_annotation = make_disturbance_status_annotation(step=0)
+    figure.update_layout(
+        annotations=static_annotations + [initial_annotation]
+    )
+
+    updated_frames = []
+    for frame_index, frame in enumerate(figure.frames):
+        frame_layout = (
+            frame.layout.to_plotly_json()
+            if frame.layout is not None
+            else {}
+        )
+        frame_layout["annotations"] = (
+            static_annotations
+            + [make_disturbance_status_annotation(step=frame_index)]
+        )
+
+        updated_frames.append(
+            go.Frame(
+                data=frame.data,
+                name=frame.name,
+                traces=frame.traces,
+                layout=go.Layout(frame_layout),
+            )
+        )
+
+    figure.frames = tuple(updated_frames)
+
 # sliders = [dict(
 #     steps=[
 #         dict(
@@ -4069,6 +4361,10 @@ for ann in fig.layout.annotations:
         ann.update(x=ann.x - 0.1, y=ann.y - 0.05, xanchor='left', align='left')
     elif "Overall" in ann.text:
         ann.update(x=ann.x - 0.15, y=ann.y - 0.05, xanchor='left', align='left')
+
+# Add the live green/red disturbance status tile after all static
+# subplot-title annotations have received their final positions.
+add_disturbance_status_to_animation(fig)
 
 # add_following_zoom_to_animated_plot(
 #     fig,
