@@ -23,7 +23,10 @@ assessment into clearly defined statements:
    - one binomial scheduled-output channel per sensor,
    - evidence [1,0] when an expected measurement arrives and [0,1] when it does
      not arrive,
-   - processed by a separate TEF.
+   - processed by a separate TEF,
+   - if an expected measurement is missing, the corresponding consistency TEFs
+     receive a VACUOUS input: no positive/negative consistency evidence is added,
+     but their temporal memory continues to advance.
 
 4. Availability-trust-discounted consistency C~_s = A_s (*) C_s
    - trust discount changes the downstream interpretation of C_s,
@@ -55,8 +58,8 @@ Temporal parametrisation
 TEFs that assess the SAME physical consistency concept use the same physical
 short-term horizon rather than the same number of samples:
 
-    consistency horizon = 5 s
-    availability horizon = 1 s
+    consistency horizon = 3.5 s
+    availability horizon = 0.5 s
 
 Thus n_ST,s ~= T * f_s.  The faster sensor contributes more evidence over the
 same physical interval, which is intentional.  The long-term discount is also
@@ -73,7 +76,7 @@ Recommended usage
 -----------------
 1. Run with SYNCHRONOUS_SENSOR_SPECIAL_CASE = True and dropout disabled.
 2. Run with SYNCHRONOUS_SENSOR_SPECIAL_CASE = False for 10 / 12.5 Hz.
-3. Compare isolated vs common-prediction sensor disbelief during faults that
+3. Compare isolated vs common-prediction normalized disbelief during faults that
    affect only Sensor 1.
 4. Inspect conditional opinions at simultaneous timestamps.
 5. Inspect direct batch C_F under changing active measurement dimension.
@@ -97,7 +100,7 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg import block_diag
-from scipy.stats import chi2, kstest, norm
+from scipy.stats import chi2, norm
 
 import subjective_logic as sl
 
@@ -157,7 +160,6 @@ SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
 SHOW_PROJECTED_PROBABILITY = True  # PP is secondary; d/u are primary plots.
 SHOW_POSITION_ERROR = True
-SHOW_PIT_HISTOGRAM = True
 
 ACTIVATE_DISTURBANCES = True
 DISTURB_SENSOR_1 = True
@@ -177,8 +179,12 @@ GRIEBEL_BACKEND = "auto"  # "auto" | "native" | "placeholder"
 #   a measurement at the same timestamp.
 GRIEBEL_ASYNC_EXTENSION_MODE = "hold_last"
 
-# Experimental output-level construction.  Availability/consistency determine
-# a sensor-support opinion; this is used as reliability trust for C_F.
+# Experimental output-level construction. Sensor support is derived ONLY from
+# availability, while C_s remains a local diagnostic. This avoids feeding the same
+# consistency information into track trust twice (through C_s and C_F).
+#
+# ANY: at least one available sensor is sufficient.
+# ALL: every configured sensor is required; therefore any dropout reduces support.
 TRACK_SENSOR_SUPPORT_RULE = "ANY"  # "ANY" or "ALL"
 
 SCENARIO_DURATION_S = 140.0
@@ -195,13 +201,19 @@ NUM_PIT_BINS = 7
 # -----------------------------------------------------------------------------
 # Time-normalised TEF settings
 # -----------------------------------------------------------------------------
-# All innovation-consistency TEFs (sensor-local, common-prior, direct batch,
-# conditional order) represent approximately the same last 5 physical seconds.
+# Sensor-local, common-prior, and direct-batch consistency channels use the
+# same physical short-term horizon.
 CONSISTENCY_SHORT_TERM_HORIZON_S = 3.5
 
-# Availability is intentionally more reactive and uses a distinct physical
-# horizon because it assesses a different process.
-AVAILABILITY_SHORT_TERM_HORIZON_S = 0.5
+# Availability assesses a different, faster process and is therefore more
+# reactive.
+AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
+
+# Conditional/update-order opinions are only updated when multiple sensors
+# measure simultaneously. In the asynchronous 10 / 12.5 Hz case this happens
+# much less frequently, so they use a longer physical horizon to accumulate
+# enough PIT evidence for a meaningful distributional assessment.
+CONDITIONAL_SHORT_TERM_HORIZON_S = 10.0
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
@@ -324,6 +336,20 @@ def scalar_pit_to_opinion(pit_value: float, num_bins: int):
     evidence[index] = 1.0
     distribution = eval(
         f"sl.DirichletDistribution{num_bins}d"
+    ).from_evidences(evidence)
+    return distribution.as_opinion()
+
+
+def vacuous_multinomial_opinion(domain_size: int):
+    """Return a vacuous multinomial opinion with zero evidence.
+
+    This is used as a scheduled TEF tick when an assessment channel cannot
+    provide an observation (e.g. because the expected sensor measurement is
+    missing). It expresses *absence of consistency evidence*, not inconsistency.
+    """
+    evidence = np.zeros(domain_size, dtype=float)
+    distribution = eval(
+        f"sl.DirichletDistribution{domain_size}d"
     ).from_evidences(evidence)
     return distribution.as_opinion()
 
@@ -466,6 +492,39 @@ def uncertainty(opinion) -> float:
     return float(opinion.uncertainty())
 
 
+def normalized_disbelief_from_components(
+    disbelief_value: float,
+    uncertainty_value: float,
+    eps: float = 1e-12,
+) -> float:
+    """Return d_norm = d / (1-u), i.e. inconsistency within committed mass.
+
+    For a vacuous opinion (u ~= 1), d_norm is undefined because no committed
+    evidence exists.  NaN is returned deliberately so plots do not suggest
+    nominal consistency merely because evidence is absent.
+    """
+    committed_mass = 1.0 - float(uncertainty_value)
+    if committed_mass <= eps:
+        return float("nan")
+    return float(np.clip(float(disbelief_value) / committed_mass, 0.0, 1.0))
+
+
+def normalized_disbelief(opinion) -> float:
+    return normalized_disbelief_from_components(
+        disbelief(opinion), uncertainty(opinion)
+    )
+
+
+def normalized_disbelief_series(
+    disbelief_values: Iterable[float],
+    uncertainty_values: Iterable[float],
+) -> list[float]:
+    return [
+        normalized_disbelief_from_components(d, u)
+        for d, u in zip(disbelief_values, uncertainty_values)
+    ]
+
+
 def prior_ok(opinion) -> float:
     try:
         return float(opinion.prior_belief_masses[0])
@@ -590,6 +649,64 @@ class SensorConsistencyState:
         self.latest_opinion = vacuous_binomial()
         self.nis_window = deque(maxlen=self.n_st)
 
+    def _refresh_latest_opinion(self) -> None:
+        radial_binomial = multinomial_to_binomial_consistency_opinion(
+            self.tef_radial.get_opinion(), NUM_PIT_BINS, prior_ok_value=0.5
+        )
+        # sqrt(0.5)^2 = 0.5 after logical multiplication of x and y.
+        component_prior = float(np.sqrt(0.5))
+        x_binomial = multinomial_to_binomial_consistency_opinion(
+            self.tef_x.get_opinion(),
+            NUM_PIT_BINS,
+            prior_ok_value=component_prior,
+        )
+        y_binomial = multinomial_to_binomial_consistency_opinion(
+            self.tef_y.get_opinion(),
+            NUM_PIT_BINS,
+            prior_ok_value=component_prior,
+        )
+        component_binomial = x_binomial.multiply(y_binomial)
+
+        # Same concurrent radial/component construction as the first paper.
+        self.latest_opinion = fuse_weighted(
+            [radial_binomial, component_binomial]
+        )
+
+    def advance_without_measurement(
+        self,
+        timestamp: datetime,
+        start_time: datetime,
+    ):
+        """Advance the TEF clock without adding consistency evidence.
+
+        A missing expected measurement provides no innovation/PIT sample.
+        Therefore a vacuous multinomial opinion is added to each temporal
+        consistency channel. This does NOT count as evidence for consistency or
+        inconsistency; it merely lets the temporal memory age on the known
+        sensor schedule.
+        """
+        self.tef_radial.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
+        self.tef_x.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
+        self.tef_y.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
+        self._refresh_latest_opinion()
+        self.latest_timestamp = timestamp
+
+        elapsed_s = (timestamp - start_time).total_seconds()
+        self.event_times_s.append(elapsed_s)
+        self.radial_pit_events.append(float("nan"))
+        self.p_ok_events.append(p_ok(self.latest_opinion))
+        self.belief_events.append(belief(self.latest_opinion))
+        self.disbelief_events.append(disbelief(self.latest_opinion))
+        self.uncertainty_events.append(uncertainty(self.latest_opinion))
+
+        # There is no NIS sample at this scheduled instant. NaNs make the
+        # diagnostic plot explicitly show that the statistic is unavailable.
+        self.nis_events.append(float("nan"))
+        self.nis_average.append(float("nan"))
+        self.nis_lower.append(float("nan"))
+        self.nis_upper.append(float("nan"))
+        return self.latest_opinion
+
     def update(
         self,
         measurement: Detection,
@@ -621,27 +738,7 @@ class SensorConsistencyState:
             scalar_pit_to_opinion(float(component_pit[1]), NUM_PIT_BINS)
         )
 
-        radial_binomial = multinomial_to_binomial_consistency_opinion(
-            self.tef_radial.get_opinion(), NUM_PIT_BINS, prior_ok_value=0.5
-        )
-        # sqrt(0.5)^2 = 0.5 after logical multiplication of x and y.
-        component_prior = float(np.sqrt(0.5))
-        x_binomial = multinomial_to_binomial_consistency_opinion(
-            self.tef_x.get_opinion(),
-            NUM_PIT_BINS,
-            prior_ok_value=component_prior,
-        )
-        y_binomial = multinomial_to_binomial_consistency_opinion(
-            self.tef_y.get_opinion(),
-            NUM_PIT_BINS,
-            prior_ok_value=component_prior,
-        )
-        component_binomial = x_binomial.multiply(y_binomial)
-
-        # Same concurrent radial/component construction as the first paper.
-        self.latest_opinion = fuse_weighted(
-            [radial_binomial, component_binomial]
-        )
+        self._refresh_latest_opinion()
         self.latest_timestamp = timestamp
 
         elapsed_s = (timestamp - start_time).total_seconds()
@@ -793,6 +890,30 @@ class BatchTrackAssessmentState:
             )
         )
         self.latest_opinion = vacuous_binomial()
+
+    def advance_without_measurement(
+        self,
+        timestamp: datetime,
+        start_time: datetime,
+    ):
+        """Advance direct-batch TEF when a scheduled union event has no data."""
+        self.tef_radial.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
+        self.latest_opinion = multinomial_to_binomial_consistency_opinion(
+            self.tef_radial.get_opinion(),
+            NUM_PIT_BINS,
+            prior_ok_value=0.5,
+        )
+
+        self.event_times_s.append((timestamp - start_time).total_seconds())
+        self.pit_events.append(float("nan"))
+        self.nis_events.append(float("nan"))
+        self.degrees_of_freedom.append(0)
+        self.active_sensor_counts.append(0)
+        self.p_ok_events.append(p_ok(self.latest_opinion))
+        self.belief_events.append(belief(self.latest_opinion))
+        self.disbelief_events.append(disbelief(self.latest_opinion))
+        self.uncertainty_events.append(uncertainty(self.latest_opinion))
+        return self.latest_opinion
 
     def update(
         self,
@@ -1437,6 +1558,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 input_rate_hz=scenario.nominal_simultaneous_event_rate_hz,
                 colour=definition.colour,
                 context_label=f"conditional after Sensor {conditioning}",
+                physical_horizon_s=CONDITIONAL_SHORT_TERM_HORIZON_S,
             )
 
     griebel = GriebelReferenceBackend(sensor_ids, dim_meas=2)
@@ -1447,6 +1569,9 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     )
     print(
         f"  availability horizon: {AVAILABILITY_SHORT_TERM_HORIZON_S:g} s"
+    )
+    print(
+        f"  conditional/order horizon: {CONDITIONAL_SHORT_TERM_HORIZON_S:g} s"
     )
     for sensor_id in sensor_ids:
         consistency = isolated_states[sensor_id]
@@ -1467,6 +1592,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         print(
             "  simultaneous/conditional: "
             f"rate~{scenario.nominal_simultaneous_event_rate_hz:.3f} Hz, "
+            f"T_ST={CONDITIONAL_SHORT_TERM_HORIZON_S:g} s, "
             f"n_ST={state.n_st}, gamma={state.discount:.6f}"
         )
     print(f"  Griebel reference: {griebel.status}")
@@ -1520,6 +1646,18 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 timestamp,
                 scenario.start_time,
             )
+            if not event.arrived:
+                # No innovation exists, so consistency must neither be rewarded
+                # nor penalised. A vacuous TEF input advances temporal memory
+                # while explicitly representing missing consistency evidence.
+                common_states[event.sensor_id].advance_without_measurement(
+                    timestamp,
+                    scenario.start_time,
+                )
+                isolated_states[event.sensor_id].advance_without_measurement(
+                    timestamp,
+                    scenario.start_time,
+                )
 
         # ------------------------------------------------------------------
         # C_s^common and C_s^iso, plus optional Griebel single-sensor SA.
@@ -1568,40 +1706,51 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         # Conditional/order opinions only when BOTH sensors currently provide
         # a measurement.  These virtual updates do not alter the functional KF.
         # ------------------------------------------------------------------
-        if len(sensor_ids) == 2 and set(active_sensor_ids) == set(sensor_ids):
+        scheduled_sensor_ids = {event.sensor_id for event in scheduled_batch}
+        if len(sensor_ids) == 2 and scheduled_sensor_ids == set(sensor_ids):
             first_id, second_id = sensor_ids
 
-            # C_{second | first}
-            posterior_after_first, _ = apply_measurement_update(
-                central_prediction,
-                active_by_id[first_id],
-            )
-            _, prediction_second_after_first = predict_measurement_from_state(
-                posterior_after_first,
-                active_by_id[second_id],
-            )
-            conditional_states[(second_id, first_id)].update(
-                active_by_id[second_id],
-                prediction_second_after_first,
-                timestamp,
-                scenario.start_time,
-            )
+            if set(active_sensor_ids) == set(sensor_ids):
+                # C_{second | first}
+                posterior_after_first, _ = apply_measurement_update(
+                    central_prediction,
+                    active_by_id[first_id],
+                )
+                _, prediction_second_after_first = predict_measurement_from_state(
+                    posterior_after_first,
+                    active_by_id[second_id],
+                )
+                conditional_states[(second_id, first_id)].update(
+                    active_by_id[second_id],
+                    prediction_second_after_first,
+                    timestamp,
+                    scenario.start_time,
+                )
 
-            # C_{first | second}
-            posterior_after_second, _ = apply_measurement_update(
-                central_prediction,
-                active_by_id[second_id],
-            )
-            _, prediction_first_after_second = predict_measurement_from_state(
-                posterior_after_second,
-                active_by_id[first_id],
-            )
-            conditional_states[(first_id, second_id)].update(
-                active_by_id[first_id],
-                prediction_first_after_second,
-                timestamp,
-                scenario.start_time,
-            )
+                # C_{first | second}
+                posterior_after_second, _ = apply_measurement_update(
+                    central_prediction,
+                    active_by_id[second_id],
+                )
+                _, prediction_first_after_second = predict_measurement_from_state(
+                    posterior_after_second,
+                    active_by_id[first_id],
+                )
+                conditional_states[(first_id, second_id)].update(
+                    active_by_id[first_id],
+                    prediction_first_after_second,
+                    timestamp,
+                    scenario.start_time,
+                )
+            else:
+                # A simultaneous conditional comparison was scheduled but cannot
+                # be formed because at least one required measurement is absent.
+                # Advance both conditional TEFs with vacuous information.
+                for conditional_state in conditional_states.values():
+                    conditional_state.advance_without_measurement(
+                        timestamp,
+                        scenario.start_time,
+                    )
 
         # ------------------------------------------------------------------
         # Direct central batch C_F: variable df -> PIT -> common U(0,1) domain.
@@ -1634,11 +1783,18 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 order_decomposition_error_21.append(
                     abs(batch_nis - (eps_second + eps_first_after_second))
                 )
+        else:
+            # A scheduled union event exists but no measurement is available.
+            # Keep the batch TEF on its physical event clock using no-evidence.
+            batch_track_state.advance_without_measurement(
+                timestamp,
+                scenario.start_time,
+            )
 
         # ------------------------------------------------------------------
         # Derived trust/health statements.  These do not feed back into C_s.
         # ------------------------------------------------------------------
-        operational = []
+        availability_support_inputs = []
         for sensor_id in sensor_ids:
             c_s = isolated_states[sensor_id].latest_opinion
             a_s = availability_states[sensor_id].latest_opinion
@@ -1646,15 +1802,19 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             trusted = trust_discount(a_s, c_s)
             trusted_sensor_history[sensor_id].append(trusted)
 
-            # Distinct proposition: the sensor path is available AND consistent.
+            # Distinct diagnostic proposition: available AND consistent.
+            # It is intentionally NOT used to discount C_F, otherwise
+            # consistency would enter track trust once through C_s and again
+            # through the direct central-filter opinion C_F.
             h_s = a_s.multiply(c_s)
             operational_sensor_history[sensor_id].append(h_s)
-            operational.append(h_s)
+
+            availability_support_inputs.append(a_s)
 
         if TRACK_SENSOR_SUPPORT_RULE.upper() == "ANY":
-            sensor_support = disjunction_all(operational)
+            sensor_support = disjunction_all(availability_support_inputs)
         elif TRACK_SENSOR_SUPPORT_RULE.upper() == "ALL":
-            sensor_support = conjunction_all(operational)
+            sensor_support = conjunction_all(availability_support_inputs)
         else:
             raise ValueError("TRACK_SENSOR_SUPPORT_RULE must be ANY or ALL")
         sensor_support_history.append(sensor_support)
@@ -1760,6 +1920,23 @@ def is_nominal_time(time_s: float) -> bool:
     return True
 
 
+def sample_series_at_times(
+    source_times: Iterable[float],
+    source_values: Iterable[float],
+    query_times: Iterable[float],
+    digits: int = 9,
+) -> list[float]:
+    """Sample an event history at exact event times using rounded float keys."""
+    lookup = {
+        round(float(t), digits): float(v)
+        for t, v in zip(source_times, source_values)
+    }
+    return [
+        lookup.get(round(float(t), digits), float("nan"))
+        for t in query_times
+    ]
+
+
 def plot_opinion_pair(
     axis_d,
     axis_u,
@@ -1773,7 +1950,7 @@ def plot_opinion_pair(
 ):
     axis_d.plot(
         times,
-        [disbelief(op) for op in opinions],
+        [normalized_disbelief(op) for op in opinions],
         label=label,
         color=colour,
         linestyle=linestyle,
@@ -1800,7 +1977,7 @@ def plot_static_results(result: ProcessingResult) -> None:
     )
 
     # ------------------------------------------------------------------
-    # Figure 1: local diagnosis - primary evaluation uses disbelief + u.
+    # Figure 1: local diagnosis - primary evaluation uses d_norm + u.
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(
         3,
@@ -1815,20 +1992,24 @@ def plot_static_results(result: ProcessingResult) -> None:
 
         axes[0, col].plot(
             iso.event_times_s,
-            iso.disbelief_events,
+            normalized_disbelief_series(
+                iso.disbelief_events, iso.uncertainty_events
+            ),
             color=iso.colour,
             linewidth=1.7,
-            label="isolated $d_C$",
+            label=r"isolated $d_{C,\mathrm{norm}}$",
         )
         axes[0, col].plot(
             common.event_times_s,
-            common.disbelief_events,
+            normalized_disbelief_series(
+                common.disbelief_events, common.uncertainty_events
+            ),
             color="tab:gray",
             linestyle="--",
             linewidth=1.2,
-            label="common-prior $d_C$",
+            label=r"common-prior $d_{C,\mathrm{norm}}$",
         )
-        axes[0, col].set_ylabel("disbelief")
+        axes[0, col].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
 
         axes[1, col].plot(
             iso.event_times_s,
@@ -1890,7 +2071,7 @@ def plot_static_results(result: ProcessingResult) -> None:
 
     fig.suptitle(
         "Sensor-specific consistency: isolated shadow KF vs common central prior\n"
-        f"({mode}; d = inconsistency evidence, u = lack of evidence)"
+        rf"({mode}; $d_{{\mathrm{{norm}}}}=d/(1-u)$ = normalized inconsistency, $u$ = lack of evidence)"
     )
     fig.tight_layout()
 
@@ -1941,9 +2122,11 @@ def plot_static_results(result: ProcessingResult) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
     axes[0].plot(
         batch.event_times_s,
-        batch.disbelief_events,
+        normalized_disbelief_series(
+            batch.disbelief_events, batch.uncertainty_events
+        ),
         color="tab:purple",
-        label=r"direct batch $d_{C_F}$",
+        label=r"direct batch $d_{C_F,\mathrm{norm}}$",
     )
     axes[1].plot(
         batch.event_times_s,
@@ -1969,7 +2152,7 @@ def plot_static_results(result: ProcessingResult) -> None:
                     f"df={2 * active_count}"
                 ),
             )
-    axes[0].set_ylabel("disbelief")
+    axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
     axes[1].set_ylabel("uncertainty")
     axes[2].set_ylabel("batch PIT")
     axes[2].set_xlabel("time [s]")
@@ -1990,39 +2173,97 @@ def plot_static_results(result: ProcessingResult) -> None:
     # ------------------------------------------------------------------
     if result.conditional_states:
         fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
+
         for (target, conditioning), state in sorted(result.conditional_states.items()):
-            label = rf"$C_{{{target}|{conditioning}}}$"
-            axes[0].plot(
-                state.event_times_s,
+            common = result.common_prediction_states[target]
+            query_times = state.event_times_s
+
+            conditional_d_norm = normalized_disbelief_series(
                 state.disbelief_events,
-                color=state.colour,
-                label=label + " disbelief",
+                state.uncertainty_events,
             )
+            common_d_norm_all = normalized_disbelief_series(
+                common.disbelief_events,
+                common.uncertainty_events,
+            )
+            common_d_norm = sample_series_at_times(
+                common.event_times_s,
+                common_d_norm_all,
+                query_times,
+            )
+            common_u = sample_series_at_times(
+                common.event_times_s,
+                common.uncertainty_events,
+                query_times,
+            )
+
+            conditional_label = rf"$C_{{{target}|{conditioning}}}$"
+            common_label = rf"$C_{{{target}|\emptyset}}$"
+
+            # Direct comparison: same sensor, same timestamp, only the prior differs.
+            axes[0].plot(
+                query_times,
+                conditional_d_norm,
+                color=state.colour,
+                linewidth=1.6,
+                label=conditional_label,
+            )
+            axes[0].plot(
+                query_times,
+                common_d_norm,
+                color=state.colour,
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.8,
+                label=common_label,
+            )
+
+            delta = np.asarray(conditional_d_norm) - np.asarray(common_d_norm)
             axes[1].plot(
-                state.event_times_s,
+                query_times,
+                delta,
+                color=state.colour,
+                linewidth=1.5,
+                label=rf"$\Delta d_{{\mathrm{{norm}},{target}|{conditioning}}}$",
+            )
+
+            axes[2].plot(
+                query_times,
                 state.uncertainty_events,
                 color=state.colour,
-                label=label + " uncertainty",
+                linewidth=1.6,
+                label=conditional_label + r" $u$",
             )
             axes[2].plot(
-                state.event_times_s,
-                state.nis_average,
+                query_times,
+                common_u,
                 color=state.colour,
-                label=label + " avg. NIS",
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.8,
+                label=common_label + r" $u$",
             )
-        axes[0].set_ylabel("disbelief")
-        axes[1].set_ylabel("uncertainty")
-        axes[2].set_ylabel("conditional NIS")
+
+        axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
+        axes[1].set_ylabel(
+            r"$\Delta d_{\mathrm{norm}} = "
+            r"d_{\mathrm{norm}}(C_{s|j})-d_{\mathrm{norm}}(C_{s|\emptyset})$"
+        )
+        axes[2].set_ylabel("uncertainty")
         axes[2].set_xlabel("time [s]")
+        axes[1].axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+
         for axis in axes:
             axis.grid(True)
             axis.legend(loc="upper right")
             add_disturbance_spans(axis)
+
         axes[0].set_ylim(-0.02, 1.02)
-        axes[1].set_ylim(-0.02, 1.02)
+        axes[2].set_ylim(-0.02, 1.02)
         fig.suptitle(
             "Conditional update-order diagnostics at simultaneous timestamps\n"
-            r"$C_{2|1}$ and $C_{1|2}$ are diagnostic statements, not overall fusion scores"
+            r"$C_{s|\emptyset}$ uses the common prior; "
+            r"$C_{s|j}$ uses the virtual posterior after sensor $j$"
         )
         fig.tight_layout()
 
@@ -2032,16 +2273,16 @@ def plot_static_results(result: ProcessingResult) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
     axes[0].plot(
         event_times,
-        [disbelief(op) for op in result.common_abf_history],
+        [normalized_disbelief(op) for op in result.common_abf_history],
         color="tab:gray",
         linestyle="--",
-        label="common-prior PIT/TEF ABF baseline: disbelief",
+        label=r"common-prior PIT/TEF ABF baseline: $d_{\mathrm{norm}}$",
     )
     axes[0].plot(
         event_times,
-        [disbelief(op) for op in result.batch_history],
+        [normalized_disbelief(op) for op in result.batch_history],
         color="tab:purple",
-        label="proposed direct batch $C_F$: disbelief",
+        label=r"proposed direct batch $C_F$: $d_{\mathrm{norm}}$",
     )
     axes[1].plot(
         event_times,
@@ -2089,7 +2330,7 @@ def plot_static_results(result: ProcessingResult) -> None:
             alpha=0.75,
             label="proposed direct batch PP (secondary view)",
         )
-    axes[0].set_ylabel("disbelief")
+    axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
     axes[1].set_ylabel("uncertainty")
     axes[2].set_ylabel("projected probability")
     axes[2].set_xlabel("time [s]")
@@ -2131,9 +2372,16 @@ def plot_static_results(result: ProcessingResult) -> None:
             axis.set_ylabel("DC / threshold")
             add_disturbance_spans(axis)
         axes[-1, 0].set_xlabel("time [s]")
-        fig.suptitle(
-            "Native Griebel single-sensor SA reproduction: threshold decisions"
-        )
+        if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+            griebel_local_title = (
+                "Native Griebel single-sensor SA reproduction: threshold decisions"
+            )
+        else:
+            griebel_local_title = (
+                "Native Griebel single-sensor assessor in the asynchronous "
+                "hold-last extension: threshold decisions"
+            )
+        fig.suptitle(griebel_local_title)
         fig.tight_layout()
 
     # ------------------------------------------------------------------
@@ -2144,20 +2392,13 @@ def plot_static_results(result: ProcessingResult) -> None:
         event_times,
         [p_ok(op) for op in result.sensor_support_history],
         color="tab:green",
-        label=rf"sensor support ({TRACK_SENSOR_SUPPORT_RULE}) $P$",
+        label=rf"availability support ({TRACK_SENSOR_SUPPORT_RULE}) $P$",
     )
     axes[1].plot(
         event_times,
-        [disbelief(op) for op in result.batch_history],
+        [normalized_disbelief(op) for op in result.batch_history],
         color="tab:purple",
-        label=r"filter consistency $d_{C_F}$",
-    )
-    axes[1].plot(
-        event_times,
-        [disbelief(op) for op in result.track_output_trust_history],
-        color="tab:red",
-        linestyle="--",
-        label=r"trust-discounted track-output $d$",
+        label=r"filter consistency $d_{C_F,\mathrm{norm}}$",
     )
     axes[2].plot(
         event_times,
@@ -2170,10 +2411,10 @@ def plot_static_results(result: ProcessingResult) -> None:
         [uncertainty(op) for op in result.track_output_trust_history],
         color="tab:red",
         linestyle="--",
-        label=r"trust-discounted track-output $u$",
+        label=r"availability-discounted track-output $u$",
     )
-    axes[0].set_ylabel("sensor support")
-    axes[1].set_ylabel("disbelief")
+    axes[0].set_ylabel("availability support")
+    axes[1].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
     axes[2].set_ylabel("uncertainty")
     axes[2].set_xlabel("time [s]")
     for axis in axes:
@@ -2185,43 +2426,10 @@ def plot_static_results(result: ProcessingResult) -> None:
     axes[2].set_ylim(-0.02, 1.02)
     fig.suptitle(
         "Experimental track-output trust construction\n"
-        r"sensor support acts as reliability trust for the direct filter-consistency opinion"
+        r"availability support acts as reliability trust for $C_F$; "
+        r"local $C_s$ remains diagnostic and is not counted twice"
     )
     fig.tight_layout()
-
-    # ------------------------------------------------------------------
-    # Figure 7: nominal batch PIT calibration by active set size.
-    # ------------------------------------------------------------------
-    if SHOW_PIT_HISTOGRAM:
-        fig, axis = plt.subplots(figsize=(10, 5))
-        nominal_mask = np.asarray(
-            [is_nominal_time(t) for t in batch.event_times_s],
-            dtype=bool,
-        )
-        batch_sizes = np.asarray(batch.active_sensor_counts)
-        pit_values = np.asarray(batch.pit_events)
-        bins = np.linspace(0.0, 1.0, NUM_PIT_BINS + 1)
-        for size, colour in ((1, "tab:blue"), (2, "tab:orange")):
-            values = pit_values[nominal_mask & (batch_sizes == size)]
-            if values.size:
-                axis.hist(
-                    values,
-                    bins=bins,
-                    density=True,
-                    histtype="step",
-                    linewidth=2.0,
-                    color=colour,
-                    label=f"{size} active sensor(s), n={values.size}",
-                )
-        axis.axhline(1.0, color="black", linestyle="--", label="U(0,1)")
-        axis.set_xlabel("batch PIT")
-        axis.set_ylabel("density")
-        axis.set_title(
-            "Nominal direct-batch PIT by active sensor count"
-        )
-        axis.grid(True)
-        axis.legend()
-        fig.tight_layout()
 
     if SHOW_POSITION_ERROR:
         fig, axis = plt.subplots(figsize=(15, 4))
@@ -2341,19 +2549,25 @@ def print_summary(result: ProcessingResult) -> None:
             f"  overall PP samples: {len(result.griebel.overall_p_ok)}"
         )
 
-    # The key cross-contamination diagnostic is nominal Sensor-2 disbelief
+    # The key cross-contamination diagnostic is nominal Sensor-2 d_norm
     # during Sensor-1-only disturbance intervals.
     s2_iso = result.isolated_states[2]
     s2_common = result.common_prediction_states[2]
-    nominal_iso = nominal_mean(s2_iso.event_times_s, s2_iso.disbelief_events)
+    s2_iso_d_norm = normalized_disbelief_series(
+        s2_iso.disbelief_events, s2_iso.uncertainty_events
+    )
+    s2_common_d_norm = normalized_disbelief_series(
+        s2_common.disbelief_events, s2_common.uncertainty_events
+    )
+    nominal_iso = nominal_mean(s2_iso.event_times_s, s2_iso_d_norm)
     nominal_common = nominal_mean(
         s2_common.event_times_s,
-        s2_common.disbelief_events,
+        s2_common_d_norm,
     )
 
     print("\nSensor-2 cross-contamination check (Sensor 1 disturbed only)")
     print(
-        f"  nominal mean disbelief: isolated={nominal_iso:.3f}, "
+        f"  nominal mean d_norm: isolated={nominal_iso:.3f}, "
         f"common-prior={nominal_common:.3f}"
     )
     for interval, label in (
@@ -2362,36 +2576,17 @@ def print_summary(result: ProcessingResult) -> None:
         (DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise"),
         (TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian"),
     ):
-        iso = interval_mean(s2_iso.event_times_s, s2_iso.disbelief_events, interval)
+        iso = interval_mean(s2_iso.event_times_s, s2_iso_d_norm, interval)
         common = interval_mean(
             s2_common.event_times_s,
-            s2_common.disbelief_events,
+            s2_common_d_norm,
             interval,
         )
         print(
-            f"  {label}: isolated d={iso:.3f} "
+            f"  {label}: isolated d_norm={iso:.3f} "
             f"(delta={iso - nominal_iso:+.3f}), "
-            f"common-prior d={common:.3f} "
+            f"common-prior d_norm={common:.3f} "
             f"(delta={common - nominal_common:+.3f})"
-        )
-
-    batch = result.batch_track_state
-    batch_sizes = np.asarray(batch.active_sensor_counts)
-    pit_values = np.asarray(batch.pit_events, dtype=float)
-    batch_times = np.asarray(batch.event_times_s, dtype=float)
-    nominal_mask = np.asarray(
-        [is_nominal_time(t) for t in batch_times],
-        dtype=bool,
-    )
-    print("\nNominal direct-batch PIT calibration")
-    for size in sorted(set(batch_sizes.tolist())):
-        values = pit_values[nominal_mask & (batch_sizes == size)]
-        if values.size < 5:
-            continue
-        statistic, p_value = kstest(values, "uniform")
-        print(
-            f"  {size} active sensor(s): n={values.size}, "
-            f"KS={statistic:.3f}, p={p_value:.3f}"
         )
 
     if result.conditional_states:
@@ -2401,7 +2596,7 @@ def print_summary(result: ProcessingResult) -> None:
                 f"  C_{{{target}|{conditioning}}}: "
                 f"events={len(state.event_times_s)}, "
                 f"rate~{state.input_rate_hz:.3f} Hz, n_ST={state.n_st}, "
-                f"nominal mean d={nominal_mean(state.event_times_s, state.disbelief_events):.3f}, "
+                f"nominal mean d_norm={nominal_mean(state.event_times_s, normalized_disbelief_series(state.disbelief_events, state.uncertainty_events)):.3f}, "
                 f"nominal mean u={nominal_mean(state.event_times_s, state.uncertainty_events):.3f}"
             )
         if result.order_decomposition_error_12:
@@ -2419,18 +2614,25 @@ def print_summary(result: ProcessingResult) -> None:
             f"{interval_mean(a2.event_times_s, a2.p_available_events, SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
         )
         print(
+            "  mean local C2 consistency uncertainty during dropout: "
+            f"{interval_mean(result.isolated_states[2].event_times_s, result.isolated_states[2].uncertainty_events, SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
+        )
+        print(
             "  mean track-output uncertainty during dropout: "
             f"{interval_mean(result.event_times_s, [uncertainty(op) for op in result.track_output_trust_history], SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
         )
 
     print("\nInterpretation reminder")
+    print("  d_norm=d/(1-u): normalized inconsistency within committed evidence")
     print("  C_s^iso      : sensor/path consistency using only that sensor history")
     print("  C_s^common   : same PIT/TEF mapping but central common prior")
     print("  A_s           : expected output availability")
     print("  A_s (*) C_s   : availability-trust-discounted interpretation")
     print("  C_{s|j}       : conditional consistency after virtual update with sensor j")
     print("  C_F           : direct consistency of the actually used central measurement batch")
-    print("  track trust    : experimental trust discount of C_F by sensor-support reliability")
+    print("  H_s=A_s AND C_s: optional operational sensor-path diagnostic")
+    print("  sensor support : availability-only system requirement (ANY/ALL)")
+    print("  track trust    : trust discount of C_F by availability support")
 
 
 def main() -> None:
