@@ -55,15 +55,24 @@ assessment into clearly defined statements:
 
 Temporal parametrisation
 ------------------------
-TEFs that assess the SAME physical consistency concept use the same physical
-short-term horizon rather than the same number of samples:
+TEF horizons are specified in physical time and converted to sample counts
+using the corresponding assessment-event rate:
 
-    consistency horizon = 3.5 s
-    availability horizon = 0.5 s
+    local/common sensor consistency horizon = 3.5 s
+    direct central-batch horizon            = 2.0 s
+    availability horizon                    = 1.0 s
+    conditional/order horizon               = 10.0 s
 
-Thus n_ST,s ~= T * f_s.  The faster sensor contributes more evidence over the
-same physical interval, which is intentional.  The long-term discount is also
-rate-normalised so that the physical fading time is independent of sample rate.
+Thus n_ST ~= T * f for the event stream feeding the respective TEF. Comparable
+channels use matched temporal parametrisation; assessment statements with
+different response requirements may use different physical horizons. The
+long-term discount is also rate-normalised so that its fading behavior is
+expressed consistently in physical time.
+
+The TEF fusion operator is configurable per assessment family. CBF is the
+default for temporal PIT observations because nominal KF innovations are
+modeled as temporally white, so successive PIT one-hot observations represent
+new evidence about the same categorical distribution.
 
 Scope assumptions
 -----------------
@@ -75,13 +84,15 @@ Scope assumptions
 Recommended usage
 -----------------
 1. Run with SYNCHRONOUS_SENSOR_SPECIAL_CASE = True and dropout disabled.
-2. Run with SYNCHRONOUS_SENSOR_SPECIAL_CASE = False for 10 / 12.5 Hz.
-3. Compare isolated vs common-prediction normalized disbelief during faults that
-   affect only Sensor 1.
-4. Inspect conditional opinions at simultaneous timestamps.
-5. Inspect direct batch C_F under changing active measurement dimension.
-6. Enable dropout to inspect A_s, trust discount, and the experimental
-   track-output trust construction.
+2. Run the nominal asynchronous case at 10 / 12.5 Hz.
+3. Enable CROSS_CONTAMINATION_RATE_STRESS_TEST for the dedicated asymmetric-rate
+   experiment in which disturbed Sensor 1 is much faster than nominal Sensor 2.
+4. Compare isolated vs common-prediction normalized disbelief during S1-only
+   faults.
+5. Inspect matched conditional opinions C_{s|empty}^{sim} vs C_{s|j}.
+6. Inspect direct batch C_F together with the active sensor-set timeline.
+7. Enable dropout to inspect A_s, vacuous consistency updates, trust discount,
+   and the experimental track-output trust construction.
 """
 
 from __future__ import annotations
@@ -110,8 +121,8 @@ from stonesoup.models.transition.linear import (
     ConstantVelocity,
     KnownTurnRate,
 )
-from stonesoup.plotter import AnimatedPlotterly
-from stonesoup.predictor.kalman import KalmanPredictor
+from stonesoup.models.transition.nonlinear import ConstantTurn
+from stonesoup.predictor.kalman import KalmanPredictor, UnscentedKalmanPredictor
 from stonesoup.selfassessor._threshold import calc_threshold_n_diff
 from stonesoup.types.array import CovarianceMatrix, StateVector
 from stonesoup.types.detection import Detection
@@ -145,25 +156,59 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 # User switches
 # =============================================================================
 
-# False: native asynchronous/multi-rate case (10 Hz and 12.5 Hz).
+# False: asynchronous/multi-rate case.
 # True: limiting case; both sensors are sampled on the 10 Hz grid.
 SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 
-SENSOR_1_RATE_HZ = 10.0
-SENSOR_2_RATE_HZ = 12.5
+# Optional dedicated stress test for cross-source prior contamination.
+# If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
+# Sensor 1 is intentionally much faster than nominal Sensor 2, so several
+# faulty S1 updates can affect the central prior before the next S2 update.
+CROSS_CONTAMINATION_RATE_STRESS_TEST = False
+
+NOMINAL_SENSOR_1_RATE_HZ = 10.0
+NOMINAL_SENSOR_2_RATE_HZ = 12.5
+CROSS_CONTAMINATION_SENSOR_1_RATE_HZ = 25.0
+CROSS_CONTAMINATION_SENSOR_2_RATE_HZ = 10.0
 SYNCHRONOUS_REFERENCE_RATE_HZ = 10.0
 
+if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+    SENSOR_1_RATE_HZ = SYNCHRONOUS_REFERENCE_RATE_HZ
+    SENSOR_2_RATE_HZ = SYNCHRONOUS_REFERENCE_RATE_HZ
+elif CROSS_CONTAMINATION_RATE_STRESS_TEST:
+    SENSOR_1_RATE_HZ = CROSS_CONTAMINATION_SENSOR_1_RATE_HZ
+    SENSOR_2_RATE_HZ = CROSS_CONTAMINATION_SENSOR_2_RATE_HZ
+else:
+    SENSOR_1_RATE_HZ = NOMINAL_SENSOR_1_RATE_HZ
+    SENSOR_2_RATE_HZ = NOMINAL_SENSOR_2_RATE_HZ
+
 # For a pure synchronous validation set this to False.
-ENABLE_SENSOR_2_DROPOUT = True
+ENABLE_SENSOR_2_DROPOUT = False
 
 SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
 SHOW_PROJECTED_PROBABILITY = True  # PP is secondary; d/u are primary plots.
 SHOW_POSITION_ERROR = True
 
-ACTIVATE_DISTURBANCES = True
+# Dynamic Plotly dashboard; the slider uses integer union-event steps.
+ANIMATION_FRAME_STRIDE = 5
+ANIMATION_FRAME_DURATION_MS = 70
+ANIMATION_TAIL_STEPS = 60
+ANIMATION_HALF_WIDTH_M = 18.0
+ANIMATION_HALF_HEIGHT_M = 18.0
+ANIMATION_AUTO_OPEN_BROWSER = True
+ANIMATION_HTML_FILENAME = "multi_sensor_selfassessment_animation.html"
+
+ACTIVATE_DISTURBANCES = False
 DISTURB_SENSOR_1 = True
 DISTURB_SENSOR_2 = False
+
+# Filter/assessment motion model.
+# False: 4D CV state [x, vx, y, vy]
+# True : 5D CT state [x, vx, y, vy, omega] using ConstantTurn and a UKF predictor.
+# The ground-truth generator stays 4D, as in the old V7 script.
+USE_CT_MODEL = False
+CT_TURN_RATE_NOISE = 0.01
 
 # Optional original Griebel reference.  "auto" uses KalmanSelfAssessor when
 # available and otherwise falls back to a non-crashing placeholder.
@@ -187,8 +232,8 @@ GRIEBEL_ASYNC_EXTENSION_MODE = "hold_last"
 # ALL: every configured sensor is required; therefore any dropout reduces support.
 TRACK_SENSOR_SUPPORT_RULE = "ANY"  # "ANY" or "ALL"
 
-SCENARIO_DURATION_S = 140.0
-TRUTH_RATE_HZ = 50.0  # exactly represents 10 Hz and 12.5 Hz
+SCENARIO_DURATION_S = 160.0
+TRUTH_RATE_HZ = 100.0  # exactly represents 5, 10, 12.5, 20 and 25 Hz
 TRUTH_DT_S = 1.0 / TRUTH_RATE_HZ
 
 Q_X = 0.25
@@ -201,18 +246,21 @@ NUM_PIT_BINS = 7
 # -----------------------------------------------------------------------------
 # Time-normalised TEF settings
 # -----------------------------------------------------------------------------
-# Sensor-local, common-prior, and direct-batch consistency channels use the
-# same physical short-term horizon.
+# Local sensor-consistency channels assess the PIT distribution over a
+# short physical history.  The number of TEF samples is derived from the
+# actual sensor rate.
 CONSISTENCY_SHORT_TERM_HORIZON_S = 3.5
 
-# Availability assesses a different, faster process and is therefore more
-# reactive.
+# The central active-batch filter-consistency statement is intentionally more
+# reactive than the local diagnostic channels.
+BATCH_SHORT_TERM_HORIZON_S = 2.0
+
+# Availability assesses a different, faster process.
 AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 
-# Conditional/update-order opinions are only updated when multiple sensors
-# measure simultaneously. In the asynchronous 10 / 12.5 Hz case this happens
-# much less frequently, so they use a longer physical horizon to accumulate
-# enough PIT evidence for a meaningful distributional assessment.
+# Conditional/update-order opinions are only updated at simultaneous sensor
+# timestamps. They therefore need a longer physical horizon to accumulate
+# enough PIT observations.
 CONDITIONAL_SHORT_TERM_HORIZON_S = 10.0
 
 REFERENCE_RATE_HZ = 10.0
@@ -221,7 +269,14 @@ CONSISTENCY_REFERENCE_LONG_TERM_DISCOUNT = 0.99
 AVAILABILITY_REFERENCE_LONG_TERM_DISCOUNT = 0.99
 ALPHA_THRESHOLD_DC = 0.01
 
-LTST_FUSION_TYPE = sl.FusionType.CUMULATIVE
+# The new TEF implementation supports several SL fusion operators.  They are
+# configured explicitly per assessment family.  CBF remains the default for
+# temporal PIT samples because, under the nominal KF assumptions, successive
+# innovations/PIT observations are modeled as temporally independent evidence.
+LOCAL_CONSISTENCY_TEF_FUSION = sl.FusionType.CUMULATIVE
+BATCH_TEF_FUSION = sl.FusionType.CUMULATIVE
+CONDITIONAL_TEF_FUSION = sl.FusionType.CUMULATIVE
+AVAILABILITY_TEF_FUSION = sl.FusionType.CUMULATIVE
 # These two flags activate the newer TEF conflict/reset behaviour available in
 # the subjective_logic implementation used by the project.
 HANDLE_SHORT_TERM_CONFLICT = True
@@ -252,21 +307,34 @@ RANDOM_SEED_SENSOR_2 = 2
 # =============================================================================
 
 OUTLIER_INTERVAL_S = (10.0, 20.0)
-INCREASED_MEAS_X_INTERVAL_S = (30.0, 40.0)
+
+# Replaces the previous "increased x measurement noise" disturbance.
+# The bias is applied only to Sensor 1 and only to the x measurement component.
+SENSOR_1_BIAS_INTERVAL_S = (30.0, 40.0)
+SENSOR_1_BIAS_VECTOR_M = np.array([3.0, 0.0], dtype=float)
+
 DECREASED_MEAS_XY_INTERVAL_S = (50.0, 60.0)
-SENSOR_2_DROPOUT_INTERVAL_S = (60.0, 70.0)
-TRUNCATED_GAUSSIAN_INTERVAL_S = (70.0, 80.0)
-TURN_INTERVAL_S = (90.0, 100.0)
-INCREASED_PROCESS_X_INTERVAL_S = (110.0, 130.0)
+
+# Explicit 10 s nominal gap before and after the dropout:
+#   previous disturbance ends at 60 s,
+#   dropout starts at 70 s and ends at 80 s,
+#   next disturbance starts at 90 s.
+SENSOR_2_DROPOUT_INTERVAL_S = (70.0, 80.0)
+
+TRUNCATED_GAUSSIAN_INTERVAL_S = (90.0, 100.0)
+TURN_INTERVAL_S = (110.0, 120.0)
+
+# Final process-noise mismatch now affects BOTH x and y process components.
+INCREASED_PROCESS_XY_INTERVAL_S = (130.0, 150.0)
 
 DISTURBANCE_INTERVALS = [
     (*OUTLIER_INTERVAL_S, "S1 outliers", "tab:red"),
-    (*INCREASED_MEAS_X_INTERVAL_S, "S1 increased x-noise", "tab:orange"),
+    (*SENSOR_1_BIAS_INTERVAL_S, "S1 +3 m x-bias", "tab:orange"),
     (*DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise", "tab:blue"),
     (*SENSOR_2_DROPOUT_INTERVAL_S, "S2 unavailable", "tab:gray"),
     (*TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian", "tab:purple"),
     (*TURN_INTERVAL_S, "common motion-model mismatch", "tab:green"),
-    (*INCREASED_PROCESS_X_INTERVAL_S, "common increased process noise", "tab:brown"),
+    (*INCREASED_PROCESS_XY_INTERVAL_S, "common increased x/y process noise", "tab:brown"),
 ]
 
 
@@ -276,6 +344,11 @@ def seconds_to_truth_step(seconds: float) -> int:
 
 def seconds_to_reference_step(seconds: float) -> int:
     return int(round(seconds * REFERENCE_RATE_HZ))
+
+
+def seconds_to_sensor_step(seconds: float, rate_hz: float) -> int:
+    """Convert physical time to the discrete index of a specific sensor stream."""
+    return round_half_up(seconds * rate_hz)
 
 
 def round_half_up(value: float) -> int:
@@ -452,6 +525,7 @@ def create_temporal_memory(
     domain_size: int,
     physical_horizon_s: float,
     reference_discount: float,
+    fusion_type,
 ):
     n_st, discount, threshold = rate_normalised_temporal_parameters(
         rate_hz,
@@ -463,7 +537,7 @@ def create_temporal_memory(
         n_st,
         threshold,
         discount,
-        LTST_FUSION_TYPE,
+        fusion_type,
         HANDLE_SHORT_TERM_CONFLICT,
         AVERAGE_DC_CONFLICT_HANDLING,
     )
@@ -612,6 +686,7 @@ class SensorConsistencyState:
     colour: str
     context_label: str
     physical_horizon_s: float = CONSISTENCY_SHORT_TERM_HORIZON_S
+    fusion_type: object = LOCAL_CONSISTENCY_TEF_FUSION
 
     tef_radial: object = field(init=False)
     tef_x: object = field(init=False)
@@ -640,6 +715,7 @@ class SensorConsistencyState:
             domain_size=NUM_PIT_BINS,
             physical_horizon_s=self.physical_horizon_s,
             reference_discount=CONSISTENCY_REFERENCE_LONG_TERM_DISCOUNT,
+            fusion_type=self.fusion_type,
         )
         self.tef_radial, self.n_st, self.discount, self.threshold = (
             create_temporal_memory(**kwargs)
@@ -795,6 +871,7 @@ class AvailabilityAssessmentState:
                 2,
                 AVAILABILITY_SHORT_TERM_HORIZON_S,
                 AVAILABILITY_REFERENCE_LONG_TERM_DISCOUNT,
+                AVAILABILITY_TEF_FUSION,
             )
         )
         self.latest_opinion = vacuous_binomial()
@@ -864,6 +941,8 @@ class BatchTrackAssessmentState:
     """Direct central-filter consistency C_F from the active measurement batch."""
 
     input_rate_hz: float
+    physical_horizon_s: float = BATCH_SHORT_TERM_HORIZON_S
+    fusion_type: object = BATCH_TEF_FUSION
     tef_radial: object = field(init=False)
     n_st: int = field(init=False)
     discount: float = field(init=False)
@@ -875,6 +954,7 @@ class BatchTrackAssessmentState:
     nis_events: list[float] = field(default_factory=list)
     degrees_of_freedom: list[int] = field(default_factory=list)
     active_sensor_counts: list[int] = field(default_factory=list)
+    active_sensor_sets: list[str] = field(default_factory=list)
     p_ok_events: list[float] = field(default_factory=list)
     belief_events: list[float] = field(default_factory=list)
     disbelief_events: list[float] = field(default_factory=list)
@@ -885,8 +965,9 @@ class BatchTrackAssessmentState:
             create_temporal_memory(
                 self.input_rate_hz,
                 NUM_PIT_BINS,
-                CONSISTENCY_SHORT_TERM_HORIZON_S,
+                self.physical_horizon_s,
                 CONSISTENCY_REFERENCE_LONG_TERM_DISCOUNT,
+                self.fusion_type,
             )
         )
         self.latest_opinion = vacuous_binomial()
@@ -909,6 +990,7 @@ class BatchTrackAssessmentState:
         self.nis_events.append(float("nan"))
         self.degrees_of_freedom.append(0)
         self.active_sensor_counts.append(0)
+        self.active_sensor_sets.append("none")
         self.p_ok_events.append(p_ok(self.latest_opinion))
         self.belief_events.append(belief(self.latest_opinion))
         self.disbelief_events.append(disbelief(self.latest_opinion))
@@ -919,7 +1001,7 @@ class BatchTrackAssessmentState:
         self,
         nis_value: float,
         degrees_of_freedom: int,
-        active_sensor_count: int,
+        active_sensor_ids: list[int],
         timestamp: datetime,
         start_time: datetime,
     ):
@@ -937,7 +1019,11 @@ class BatchTrackAssessmentState:
         self.pit_events.append(pit_value)
         self.nis_events.append(float(nis_value))
         self.degrees_of_freedom.append(int(degrees_of_freedom))
-        self.active_sensor_counts.append(int(active_sensor_count))
+        active_sensor_ids = sorted(int(sensor_id) for sensor_id in active_sensor_ids)
+        self.active_sensor_counts.append(len(active_sensor_ids))
+        self.active_sensor_sets.append(
+            "+".join(f"S{sensor_id}" for sensor_id in active_sensor_ids)
+        )
         self.p_ok_events.append(p_ok(self.latest_opinion))
         self.belief_events.append(belief(self.latest_opinion))
         self.disbelief_events.append(disbelief(self.latest_opinion))
@@ -1161,11 +1247,6 @@ class ScenarioData:
 
 
 def build_sensor_definitions() -> dict[int, SensorDefinition]:
-    sensor_2_actual_rate = (
-        SYNCHRONOUS_REFERENCE_RATE_HZ
-        if SYNCHRONOUS_SENSOR_SPECIAL_CASE
-        else SENSOR_2_RATE_HZ
-    )
     return {
         1: SensorDefinition(
             1,
@@ -1179,8 +1260,8 @@ def build_sensor_definitions() -> dict[int, SensorDefinition]:
         2: SensorDefinition(
             2,
             "Sensor 2",
-            sensor_2_actual_rate,
-            sensor_2_actual_rate,
+            SENSOR_2_RATE_HZ,
+            SENSOR_2_RATE_HZ,
             MEASUREMENT_VARIANCE_SENSOR_2,
             "tab:orange",
             DISTURB_SENSOR_2,
@@ -1203,15 +1284,15 @@ def generate_truth(start_time: datetime) -> GroundTruthPath:
     disturbance_factor = 32 if ACTIVATE_DISTURBANCES else 1
     transition_configs = {
         "noise_diff_coeff": [[Q_X, Q_Y]],
-        "disturb_noise_coeff": [True, False],
+        "disturb_noise_coeff": [True, True],
         "disturbance_mode": ["jump"],
         "parameters": [[
             [
-                seconds_to_truth_step(INCREASED_PROCESS_X_INTERVAL_S[0]),
+                seconds_to_truth_step(INCREASED_PROCESS_XY_INTERVAL_S[0]),
                 disturbance_factor,
             ],
             [
-                seconds_to_truth_step(INCREASED_PROCESS_X_INTERVAL_S[1]),
+                seconds_to_truth_step(INCREASED_PROCESS_XY_INTERVAL_S[1]),
                 1.0 / disturbance_factor,
             ],
         ]],
@@ -1232,7 +1313,9 @@ def generate_truth(start_time: datetime) -> GroundTruthPath:
             cv_model, transition_configs, step
         )
         active_model = (
-            right_turn_model if turn_start <= step < turn_end else cv_model
+            right_turn_model
+            if ACTIVATE_DISTURBANCES and turn_start <= step < turn_end
+            else cv_model
         )
         truth.append(
             GroundTruthState(
@@ -1279,30 +1362,61 @@ def generate_sensor_schedule(
         noise_covar=np.eye(2) * definition.variance,
     )
     filter_model = LinearGaussian(
-        ndim_state=4,
+        ndim_state=5 if USE_CT_MODEL else 4,
         mapping=(0, 2),
         noise_covar=np.eye(2) * definition.variance,
     )
 
     disturbance_factor = 2 if ACTIVATE_DISTURBANCES else 1
+
+    # disturbance_measurement_noise() was originally called once per sample
+    # with a strictly increasing sample index k.  Therefore all disturbance
+    # boundaries are converted to the ACTUAL sensor time base.  Passing a
+    # rounded 10-Hz reference index to a 20-Hz sensor repeats the same k two or
+    # three times and can apply stateful jump/outlier logic repeatedly.
+    sensor_step = lambda seconds: seconds_to_sensor_step(  # noqa: E731
+        seconds, definition.actual_rate_hz
+    )
     measurement_configs = {
         "disturbance_mode": ["jump", "outliers"],
         "parameters": [
             [
-                [300, disturbance_factor, [1, 0]],
-                [400, 1.0 / disturbance_factor, [1, 0]],
-                [500, 1.0 / disturbance_factor, [1, 1]],
-                [600, disturbance_factor, [1, 1]],
+                [
+                    sensor_step(DECREASED_MEAS_XY_INTERVAL_S[0]),
+                    1.0 / disturbance_factor,
+                    [1, 1],
+                ],
+                [
+                    sensor_step(DECREASED_MEAS_XY_INTERVAL_S[1]),
+                    disturbance_factor,
+                    [1, 1],
+                ],
             ],
-            [[100, 200, 10, 8]],
+            [[
+                sensor_step(OUTLIER_INTERVAL_S[0]),
+                sensor_step(OUTLIER_INTERVAL_S[1]),
+                10,
+                8,
+            ]],
         ],
     }
 
     schedule: list[ScheduledSensorEvent] = []
     detections: list[Detection] = []
-    for truth_index in sensor_truth_indices(definition.actual_rate_hz):
+    sensor_indices = sensor_truth_indices(definition.actual_rate_hz)
+    for measurement_index, truth_index in enumerate(sensor_indices):
         state = truth[truth_index]
         elapsed_s = truth_index / TRUTH_RATE_HZ
+
+        # Advance the disturbance model on every SCHEDULED sensor tick.  This is
+        # done before dropout handling so that a temporary missing measurement
+        # does not freeze the disturbance model's internal discrete-time state.
+        if definition.disturb_measurements and ACTIVATE_DISTURBANCES:
+            true_model = disturbance_measurement_noise(
+                true_model,
+                measurement_configs,
+                measurement_index,
+            )
 
         unavailable = (
             definition.sensor_id == 2
@@ -1321,13 +1435,6 @@ def generate_sensor_schedule(
             )
             continue
 
-        if definition.disturb_measurements and ACTIVATE_DISTURBANCES:
-            true_model = disturbance_measurement_noise(
-                true_model,
-                measurement_configs,
-                seconds_to_reference_step(elapsed_s),
-            )
-
         if (
             definition.disturb_measurements
             and ACTIVATE_DISTURBANCES
@@ -1341,6 +1448,19 @@ def generate_sensor_schedule(
             )
         else:
             measurement_vector = true_model.function(state, noise=True)
+
+        if (
+            definition.sensor_id == 1
+            and definition.disturb_measurements
+            and ACTIVATE_DISTURBANCES
+            and SENSOR_1_BIAS_INTERVAL_S[0]
+            <= elapsed_s
+            < SENSOR_1_BIAS_INTERVAL_S[1]
+        ):
+            measurement_vector = StateVector(
+                np.asarray(measurement_vector, dtype=float).reshape(-1, 1)
+                + SENSOR_1_BIAS_VECTOR_M.reshape(-1, 1)
+            )
 
         detection = Detection(
             measurement_vector,
@@ -1410,12 +1530,26 @@ def build_scenario() -> ScenarioData:
 
 
 def make_transition_model():
+    if USE_CT_MODEL:
+        return ConstantTurn([Q_X, Q_Y], CT_TURN_RATE_NOISE)
     return CombinedLinearGaussianTransitionModel(
         [ConstantVelocity(Q_X), ConstantVelocity(Q_Y)]
     )
 
 
+def make_predictor():
+    if USE_CT_MODEL:
+        return UnscentedKalmanPredictor(make_transition_model())
+    return KalmanPredictor(make_transition_model())
+
+
 def initial_filter_state(start_time: datetime) -> GaussianState:
+    if USE_CT_MODEL:
+        return GaussianState(
+            StateVector([[0.0], [5.0], [0.0], [5.0], [0.0]]),
+            CovarianceMatrix(np.diag([0.5, 1.0, 0.5, 1.0, 0.1])),
+            timestamp=start_time,
+        )
     return GaussianState(
         StateVector([[0.0], [5.0], [0.0], [5.0]]),
         CovarianceMatrix(np.diag([0.5, 1.0, 0.5, 1.0])),
@@ -1488,6 +1622,7 @@ class ProcessingResult:
     common_prediction_states: dict[int, SensorConsistencyState]
     availability_states: dict[int, AvailabilityAssessmentState]
     conditional_states: dict[tuple[int, int], SensorConsistencyState]
+    conditional_reference_states: dict[int, SensorConsistencyState]
     batch_track_state: BatchTrackAssessmentState
     griebel: GriebelReferenceBackend
 
@@ -1505,7 +1640,7 @@ class ProcessingResult:
 def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     sensor_ids = sorted(scenario.sensor_definitions)
 
-    central_predictor = KalmanPredictor(make_transition_model())
+    central_predictor = make_predictor()
     central_prior = initial_filter_state(scenario.start_time)
 
     isolated_states: dict[int, SensorConsistencyState] = {}
@@ -1520,6 +1655,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             input_rate_hz=definition.actual_rate_hz,
             colour=definition.colour,
             context_label="isolated sensor-only KF",
+            fusion_type=LOCAL_CONSISTENCY_TEF_FUSION,
         )
         common_states[sensor_id] = SensorConsistencyState(
             sensor_id=sensor_id,
@@ -1527,6 +1663,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             input_rate_hz=definition.actual_rate_hz,
             colour=definition.colour,
             context_label="common central prediction",
+            fusion_type=LOCAL_CONSISTENCY_TEF_FUSION,
         )
         availability_states[sensor_id] = AvailabilityAssessmentState(
             sensor_id=sensor_id,
@@ -1538,7 +1675,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             sensor_id=sensor_id,
             assessment=isolated_states[sensor_id],
             prior=initial_filter_state(scenario.start_time),
-            predictor=KalmanPredictor(make_transition_model()),
+            predictor=make_predictor(),
         )
 
     batch_track_state = BatchTrackAssessmentState(
@@ -1546,12 +1683,26 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     )
 
     # Ordered pair (target, conditioning sensor): C_{target | conditioning}.
-    # V3 uses the simultaneous-event rate as the physical input rate.
+    # A matched reference C_{target | emptyset}^{sim} runs on EXACTLY the same
+    # simultaneous timestamps and with exactly the same TEF parametrisation.
+    # Therefore the only difference between both channels is the virtual update
+    # with the conditioning sensor.
     conditional_states: dict[tuple[int, int], SensorConsistencyState] = {}
+    conditional_reference_states: dict[int, SensorConsistencyState] = {}
     if len(sensor_ids) == 2:
         for target in sensor_ids:
             conditioning = sensor_ids[1] if target == sensor_ids[0] else sensor_ids[0]
             definition = scenario.sensor_definitions[target]
+
+            conditional_reference_states[target] = SensorConsistencyState(
+                sensor_id=target,
+                label=f"{definition.label} | common prior @ simultaneous events",
+                input_rate_hz=scenario.nominal_simultaneous_event_rate_hz,
+                colour=definition.colour,
+                context_label="matched simultaneous common-prior reference",
+                physical_horizon_s=CONDITIONAL_SHORT_TERM_HORIZON_S,
+                fusion_type=CONDITIONAL_TEF_FUSION,
+            )
             conditional_states[(target, conditioning)] = SensorConsistencyState(
                 sensor_id=target,
                 label=f"{definition.label} | Sensor {conditioning}",
@@ -1559,6 +1710,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 colour=definition.colour,
                 context_label=f"conditional after Sensor {conditioning}",
                 physical_horizon_s=CONDITIONAL_SHORT_TERM_HORIZON_S,
+                fusion_type=CONDITIONAL_TEF_FUSION,
             )
 
     griebel = GriebelReferenceBackend(sensor_ids, dim_meas=2)
@@ -1568,10 +1720,20 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         f"  consistency horizon: {CONSISTENCY_SHORT_TERM_HORIZON_S:g} s"
     )
     print(
+        f"  batch horizon: {BATCH_SHORT_TERM_HORIZON_S:g} s"
+    )
+    print(
         f"  availability horizon: {AVAILABILITY_SHORT_TERM_HORIZON_S:g} s"
     )
     print(
         f"  conditional/order horizon: {CONDITIONAL_SHORT_TERM_HORIZON_S:g} s"
+    )
+    print(
+        "  TEF fusion types: "
+        f"local={LOCAL_CONSISTENCY_TEF_FUSION}, "
+        f"batch={BATCH_TEF_FUSION}, "
+        f"conditional={CONDITIONAL_TEF_FUSION}, "
+        f"availability={AVAILABILITY_TEF_FUSION}"
     )
     for sensor_id in sensor_ids:
         consistency = isolated_states[sensor_id]
@@ -1584,6 +1746,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     print(
         "  central batch: "
         f"rate~{scenario.nominal_batch_event_rate_hz:.3f} Hz, "
+        f"T_ST={BATCH_SHORT_TERM_HORIZON_S:g} s, "
         f"n_ST={batch_track_state.n_st}, "
         f"gamma={batch_track_state.discount:.6f}"
     )
@@ -1711,6 +1874,20 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             first_id, second_id = sensor_ids
 
             if set(active_sensor_ids) == set(sensor_ids):
+                # Matched C_{s|emptyset}^{sim} references: evaluate the target
+                # measurement directly against the untouched central prior.
+                for target in sensor_ids:
+                    _, common_prediction_sim = predict_measurement_from_state(
+                        central_prediction,
+                        active_by_id[target],
+                    )
+                    conditional_reference_states[target].update(
+                        active_by_id[target],
+                        common_prediction_sim,
+                        timestamp,
+                        scenario.start_time,
+                    )
+
                 # C_{second | first}
                 posterior_after_first, _ = apply_measurement_update(
                     central_prediction,
@@ -1743,9 +1920,14 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                     scenario.start_time,
                 )
             else:
-                # A simultaneous conditional comparison was scheduled but cannot
-                # be formed because at least one required measurement is absent.
-                # Advance both conditional TEFs with vacuous information.
+                # A simultaneous comparison was scheduled but cannot be formed.
+                # Advance matched reference and conditional TEFs with vacuous
+                # information so both retain the same physical event clock.
+                for reference_state in conditional_reference_states.values():
+                    reference_state.advance_without_measurement(
+                        timestamp,
+                        scenario.start_time,
+                    )
                 for conditional_state in conditional_states.values():
                     conditional_state.advance_without_measurement(
                         timestamp,
@@ -1763,7 +1945,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             batch_track_state.update(
                 batch_nis,
                 batch_df,
-                len(active_measurements),
+                active_sensor_ids,
                 timestamp,
                 scenario.start_time,
             )
@@ -1773,8 +1955,8 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             # residual as a sanity check of the order analysis.
             if len(sensor_ids) == 2 and set(active_sensor_ids) == set(sensor_ids):
                 first_id, second_id = sensor_ids
-                eps_first = common_states[first_id].nis_events[-1]
-                eps_second = common_states[second_id].nis_events[-1]
+                eps_first = conditional_reference_states[first_id].nis_events[-1]
+                eps_second = conditional_reference_states[second_id].nis_events[-1]
                 eps_second_after_first = conditional_states[(second_id, first_id)].nis_events[-1]
                 eps_first_after_second = conditional_states[(first_id, second_id)].nis_events[-1]
                 order_decomposition_error_12.append(
@@ -1883,6 +2065,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         common_prediction_states=common_states,
         availability_states=availability_states,
         conditional_states=conditional_states,
+        conditional_reference_states=conditional_reference_states,
         batch_track_state=batch_track_state,
         griebel=griebel,
         trusted_sensor_history=trusted_sensor_history,
@@ -1920,23 +2103,6 @@ def is_nominal_time(time_s: float) -> bool:
     return True
 
 
-def sample_series_at_times(
-    source_times: Iterable[float],
-    source_values: Iterable[float],
-    query_times: Iterable[float],
-    digits: int = 9,
-) -> list[float]:
-    """Sample an event history at exact event times using rounded float keys."""
-    lookup = {
-        round(float(t), digits): float(v)
-        for t, v in zip(source_times, source_values)
-    }
-    return [
-        lookup.get(round(float(t), digits), float("nan"))
-        for t in query_times
-    ]
-
-
 def plot_opinion_pair(
     axis_d,
     axis_u,
@@ -1970,11 +2136,15 @@ def plot_static_results(result: ProcessingResult) -> None:
     event_times = np.asarray(result.event_times_s, dtype=float)
     sensor_ids = sorted(result.isolated_states)
 
-    mode = (
-        "fully synchronous 10 Hz"
-        if SYNCHRONOUS_SENSOR_SPECIAL_CASE
-        else "asynchronous 10 Hz / 12.5 Hz"
-    )
+    if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+        mode = "fully synchronous 10 Hz"
+    elif CROSS_CONTAMINATION_RATE_STRESS_TEST:
+        mode = (
+            "asynchronous cross-contamination stress: "
+            f"{SENSOR_1_RATE_HZ:g} Hz / {SENSOR_2_RATE_HZ:g} Hz"
+        )
+    else:
+        mode = "asynchronous 10 Hz / 12.5 Hz"
 
     # ------------------------------------------------------------------
     # Figure 1: local diagnosis - primary evaluation uses d_norm + u.
@@ -2116,7 +2286,7 @@ def plot_static_results(result: ProcessingResult) -> None:
     fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Figure 3: direct central-filter batch opinion and varying dimensions.
+    # Figure 3: direct central-filter batch opinion and active sensor set.
     # ------------------------------------------------------------------
     batch = result.batch_track_state
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
@@ -2134,37 +2304,41 @@ def plot_static_results(result: ProcessingResult) -> None:
         color="tab:purple",
         label=r"direct batch $u_{C_F}$",
     )
-    for active_count, colour, marker in (
-        (1, "tab:blue", "o"),
-        (2, "tab:orange", "x"),
-    ):
-        mask = np.asarray(batch.active_sensor_counts) == active_count
-        if np.any(mask):
-            axes[2].scatter(
-                np.asarray(batch.event_times_s)[mask],
-                np.asarray(batch.pit_events)[mask],
-                color=colour,
-                marker=marker,
-                s=12,
-                alpha=0.65,
-                label=(
-                    f"{active_count} active sensor(s), "
-                    f"df={2 * active_count}"
-                ),
-            )
+
+    # Categorical active-set timeline. This shows which measurement batch
+    # actually generated each central-filter PIT observation.
+    labels_in_order = []
+    for label in batch.active_sensor_sets:
+        if label not in labels_in_order:
+            labels_in_order.append(label)
+    active_set_to_y = {label: idx for idx, label in enumerate(labels_in_order)}
+    active_set_y = [active_set_to_y[label] for label in batch.active_sensor_sets]
+
+    axes[2].scatter(
+        batch.event_times_s,
+        active_set_y,
+        c="tab:blue",
+        s=10,
+        alpha=0.7,
+    )
+    axes[2].set_yticks(list(active_set_to_y.values()))
+    axes[2].set_yticklabels(list(active_set_to_y.keys()))
+    axes[2].set_ylabel("active set")
+    axes[2].set_xlabel("time [s]")
+
     axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
     axes[1].set_ylabel("uncertainty")
-    axes[2].set_ylabel("batch PIT")
-    axes[2].set_xlabel("time [s]")
     for axis in axes:
         axis.grid(True)
-        axis.legend(loc="upper right")
         add_disturbance_spans(axis)
+    axes[0].legend(loc="upper right")
+    axes[1].legend(loc="upper right")
     axes[0].set_ylim(-0.02, 1.02)
     axes[1].set_ylim(-0.02, 1.02)
-    axes[2].set_ylim(-0.02, 1.02)
     fig.suptitle(
-        "Direct central-filter consistency $C_F$: variable batch dimension -> one PIT domain"
+        "Direct central-filter consistency $C_F$: "
+        rf"$T_{{ST}}={BATCH_SHORT_TERM_HORIZON_S:g}$ s, "
+        "variable active measurement batch"
     )
     fig.tight_layout()
 
@@ -2175,52 +2349,43 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
 
         for (target, conditioning), state in sorted(result.conditional_states.items()):
-            common = result.common_prediction_states[target]
-            query_times = state.event_times_s
+            reference = result.conditional_reference_states[target]
 
             conditional_d_norm = normalized_disbelief_series(
                 state.disbelief_events,
                 state.uncertainty_events,
             )
-            common_d_norm_all = normalized_disbelief_series(
-                common.disbelief_events,
-                common.uncertainty_events,
-            )
-            common_d_norm = sample_series_at_times(
-                common.event_times_s,
-                common_d_norm_all,
-                query_times,
-            )
-            common_u = sample_series_at_times(
-                common.event_times_s,
-                common.uncertainty_events,
-                query_times,
+            reference_d_norm = normalized_disbelief_series(
+                reference.disbelief_events,
+                reference.uncertainty_events,
             )
 
             conditional_label = rf"$C_{{{target}|{conditioning}}}$"
-            common_label = rf"$C_{{{target}|\emptyset}}$"
+            reference_label = rf"$C_{{{target}|\emptyset}}^{{\mathrm{{sim}}}}$"
 
-            # Direct comparison: same sensor, same timestamp, only the prior differs.
+            # Same timestamps, same rate, same TEF horizon/operator. The only
+            # difference is whether the conditioning sensor was virtually
+            # processed before assessing the target sensor.
             axes[0].plot(
-                query_times,
+                state.event_times_s,
                 conditional_d_norm,
                 color=state.colour,
                 linewidth=1.6,
                 label=conditional_label,
             )
             axes[0].plot(
-                query_times,
-                common_d_norm,
+                reference.event_times_s,
+                reference_d_norm,
                 color=state.colour,
                 linestyle="--",
                 linewidth=1.2,
                 alpha=0.8,
-                label=common_label,
+                label=reference_label,
             )
 
-            delta = np.asarray(conditional_d_norm) - np.asarray(common_d_norm)
+            delta = np.asarray(conditional_d_norm) - np.asarray(reference_d_norm)
             axes[1].plot(
-                query_times,
+                state.event_times_s,
                 delta,
                 color=state.colour,
                 linewidth=1.5,
@@ -2228,26 +2393,27 @@ def plot_static_results(result: ProcessingResult) -> None:
             )
 
             axes[2].plot(
-                query_times,
+                state.event_times_s,
                 state.uncertainty_events,
                 color=state.colour,
                 linewidth=1.6,
                 label=conditional_label + r" $u$",
             )
             axes[2].plot(
-                query_times,
-                common_u,
+                reference.event_times_s,
+                reference.uncertainty_events,
                 color=state.colour,
                 linestyle="--",
                 linewidth=1.2,
                 alpha=0.8,
-                label=common_label + r" $u$",
+                label=reference_label + r" $u$",
             )
 
         axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
         axes[1].set_ylabel(
             r"$\Delta d_{\mathrm{norm}} = "
-            r"d_{\mathrm{norm}}(C_{s|j})-d_{\mathrm{norm}}(C_{s|\emptyset})$"
+            r"d_{\mathrm{norm}}(C_{s|j})"
+            r"-d_{\mathrm{norm}}(C_{s|\emptyset}^{\mathrm{sim}})$"
         )
         axes[2].set_ylabel("uncertainty")
         axes[2].set_xlabel("time [s]")
@@ -2261,9 +2427,9 @@ def plot_static_results(result: ProcessingResult) -> None:
         axes[0].set_ylim(-0.02, 1.02)
         axes[2].set_ylim(-0.02, 1.02)
         fig.suptitle(
-            "Conditional update-order diagnostics at simultaneous timestamps\n"
-            r"$C_{s|\emptyset}$ uses the common prior; "
-            r"$C_{s|j}$ uses the virtual posterior after sensor $j$"
+            "Matched conditional update-order diagnostics\n"
+            rf"same simultaneous events, same $T_{{ST}}={CONDITIONAL_SHORT_TERM_HORIZON_S:g}$ s "
+            r"TEF; only the virtual preceding sensor update differs"
         )
         fig.tight_layout()
 
@@ -2465,46 +2631,522 @@ def sanitise_track_covariance(track: Track) -> Track:
     return clean
 
 
+def _op_triplet(opinion) -> tuple[float, float, float]:
+    return (
+        float(belief(opinion)),
+        float(disbelief(opinion)),
+        float(uncertainty(opinion)),
+    )
+
+
+def _vacuous_triplet() -> tuple[float, float, float]:
+    return (0.0, 0.0, 1.0)
+
+
+def _state_triplet_at_time(state, elapsed_s: float) -> tuple[float, float, float]:
+    """Last available opinion at/before elapsed_s."""
+    if not state.event_times_s:
+        return _vacuous_triplet()
+    times = np.asarray(state.event_times_s, dtype=float)
+    index = int(np.searchsorted(times, elapsed_s, side="right") - 1)
+    if index < 0:
+        return _vacuous_triplet()
+    return (
+        float(state.belief_events[index]),
+        float(state.disbelief_events[index]),
+        float(state.uncertainty_events[index]),
+    )
+
+
+def _ternary_marker_trace(go, entries, marker_size: int = 12):
+    labels, b_values, d_values, u_values, colours = [], [], [], [], []
+    for label, value, colour in entries:
+        b_value, d_value, u_value = value if isinstance(value, tuple) else _op_triplet(value)
+        labels.append(label)
+        b_values.append(b_value)
+        d_values.append(d_value)
+        u_values.append(u_value)
+        colours.append(colour)
+
+    return go.Scatterternary(
+        a=u_values,
+        b=d_values,
+        c=b_values,
+        mode="markers",
+        marker=dict(
+            size=marker_size,
+            color=colours,
+            line=dict(width=1, color="black"),
+        ),
+        text=labels,
+        hovertemplate=(
+            "%{text}<br>"
+            "belief=%{c:.3f}<br>"
+            "disbelief=%{b:.3f}<br>"
+            "uncertainty=%{a:.3f}<extra></extra>"
+        ),
+        showlegend=False,
+    )
+
+
+def _configure_ternary_axes(fig) -> None:
+    for key in [key for key in fig.layout if str(key).startswith("ternary")]:
+        fig.layout[key].update(
+            sum=1,
+            aaxis=dict(title="uncertainty", min=0, gridcolor="rgba(100,100,100,0.3)"),
+            baxis=dict(title="disbelief", min=0, gridcolor="rgba(100,100,100,0.3)"),
+            caxis=dict(title="belief", min=0, gridcolor="rgba(100,100,100,0.3)"),
+        )
+
+
+def _active_disturbance_labels(elapsed_s: float) -> list[str]:
+    labels: list[str] = []
+
+    if ACTIVATE_DISTURBANCES and DISTURB_SENSOR_1:
+        for start_s, end_s, label, _ in DISTURBANCE_INTERVALS:
+            if label.startswith("S1 ") and start_s <= elapsed_s < end_s:
+                labels.append(label)
+
+    if ACTIVATE_DISTURBANCES and DISTURB_SENSOR_2:
+        for start_s, end_s, label, _ in DISTURBANCE_INTERVALS:
+            if (
+                label.startswith("S2 ")
+                and "unavailable" not in label
+                and start_s <= elapsed_s < end_s
+            ):
+                labels.append(label)
+
+    if (
+        ENABLE_SENSOR_2_DROPOUT
+        and SENSOR_2_DROPOUT_INTERVAL_S[0]
+        <= elapsed_s
+        < SENSOR_2_DROPOUT_INTERVAL_S[1]
+    ):
+        labels.append("S2 unavailable")
+
+    if ACTIVATE_DISTURBANCES:
+        if TURN_INTERVAL_S[0] <= elapsed_s < TURN_INTERVAL_S[1]:
+            labels.append("common motion-model mismatch")
+        if (
+            INCREASED_PROCESS_XY_INTERVAL_S[0]
+            <= elapsed_s
+            < INCREASED_PROCESS_XY_INTERVAL_S[1]
+        ):
+            labels.append("common increased x/y process noise")
+
+    return labels
+
+
+def _disturbance_annotation(step: int, elapsed_s: float) -> dict:
+    active = _active_disturbance_labels(elapsed_s)
+
+    if active:
+        title = "ACTIVE DISTURBANCE"
+        body = "<br>".join(active)
+        bg = "rgba(190,35,35,0.96)"
+        border = "rgb(125,15,15)"
+    elif ACTIVATE_DISTURBANCES or ENABLE_SENSOR_2_DROPOUT:
+        title = "DISTURBANCE STATUS"
+        body = "Nominal operation"
+        bg = "rgba(25,145,70,0.96)"
+        border = "rgb(10,95,40)"
+    else:
+        title = "DISTURBANCE STATUS"
+        body = "Disturbances disabled"
+        bg = "rgba(70,130,180,0.95)"
+        border = "rgb(45,90,125)"
+
+    return dict(
+        x=0.29,
+        y=0.985,
+        xref="paper",
+        yref="paper",
+        xanchor="center",
+        yanchor="top",
+        text=(
+            f"<b>{title}</b><br>{body}<br>"
+            f"<span style='font-size:11px'>Step {int(step)}</span>"
+        ),
+        showarrow=False,
+        align="center",
+        bgcolor=bg,
+        bordercolor=border,
+        borderwidth=2,
+        borderpad=8,
+        font=dict(color="white", size=13),
+    )
+
+
+def _position_xy(state) -> np.ndarray:
+    vector = np.asarray(state.state_vector, dtype=float).reshape(-1)
+    return np.array([float(vector[0]), float(vector[2])], dtype=float)
+
+
+def _covariance_ellipse_relative(
+    state,
+    sigma_scale: float = 2.0,
+    n_points: int = 60,
+):
+    covariance = np.asarray(state.covar, dtype=float)
+    p_xy = covariance[np.ix_([0, 2], [0, 2])]
+    p_xy = 0.5 * (p_xy + p_xy.T)
+    eigvals, eigvecs = np.linalg.eigh(p_xy)
+    eigvals = np.maximum(eigvals, 1e-10)
+    angles = np.linspace(0.0, 2.0 * np.pi, n_points)
+    circle = np.vstack((np.cos(angles), np.sin(angles)))
+    ellipse = eigvecs @ np.diag(sigma_scale * np.sqrt(eigvals)) @ circle
+    return ellipse[0, :], ellipse[1, :]
+
+
 def show_dynamic_animation(
     scenario: ScenarioData,
     result: ProcessingResult,
 ) -> None:
-    plotter = AnimatedPlotterly(
-        result.event_timestamps,
-        tail_length=ANIMATION_TAIL_LENGTH,
-    )
-    plotter.plot_ground_truths(scenario.truth, [0, 2])
+    """V7-style Plotly dashboard with follow-view and SL opinion triangles."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-    for sensor_id, colour in ((1, "royalblue"), (2, "darkorange")):
-        before = len(plotter.fig.data)
-        plotter.plot_measurements(
-            scenario.measurements_by_sensor[sensor_id],
-            [0, 2],
+    if len(result.track) == 0 or len(result.event_timestamps) == 0:
+        print("Dynamic animation skipped: no track/event data.")
+        return
+
+    all_steps = list(range(len(result.event_timestamps)))
+    stride = max(1, int(ANIMATION_FRAME_STRIDE))
+    frame_steps = all_steps[::stride]
+    if frame_steps[-1] != all_steps[-1]:
+        frame_steps.append(all_steps[-1])
+
+    truth_by_timestamp = {state.timestamp: state for state in scenario.truth}
+    measurement_records = {}
+    for sensor_id, measurements in scenario.measurements_by_sensor.items():
+        records = []
+        for measurement in measurements:
+            z = np.asarray(measurement.state_vector, dtype=float).reshape(-1)
+            records.append((measurement.timestamp, float(z[0]), float(z[1])))
+        measurement_records[sensor_id] = records
+
+    def history_triplet(history, step):
+        if not history:
+            return _vacuous_triplet()
+        return _op_triplet(history[min(step, len(history) - 1)])
+
+    def opinion_panels(step: int):
+        elapsed_s = float(result.event_times_s[step])
+
+        c1_iso = _state_triplet_at_time(result.isolated_states[1], elapsed_s)
+        c1_common = _state_triplet_at_time(result.common_prediction_states[1], elapsed_s)
+        c2_iso = _state_triplet_at_time(result.isolated_states[2], elapsed_s)
+        c2_common = _state_triplet_at_time(result.common_prediction_states[2], elapsed_s)
+        a1 = _state_triplet_at_time(result.availability_states[1], elapsed_s)
+        a2 = _state_triplet_at_time(result.availability_states[2], elapsed_s)
+
+        trusted1 = history_triplet(result.trusted_sensor_history[1], step)
+        trusted2 = history_triplet(result.trusted_sensor_history[2], step)
+        h1 = history_triplet(result.operational_sensor_history[1], step)
+        h2 = history_triplet(result.operational_sensor_history[2], step)
+        c_f = history_triplet(result.batch_history, step)
+        common_abf = history_triplet(result.common_abf_history, step)
+        support = history_triplet(result.sensor_support_history, step)
+        track_trust = history_triplet(result.track_output_trust_history, step)
+
+        c12 = _state_triplet_at_time(result.conditional_states[(1, 2)], elapsed_s)
+        c1ref = _state_triplet_at_time(result.conditional_reference_states[1], elapsed_s)
+        c21 = _state_triplet_at_time(result.conditional_states[(2, 1)], elapsed_s)
+        c2ref = _state_triplet_at_time(result.conditional_reference_states[2], elapsed_s)
+
+        return [
+            [("C1 isolated", c1_iso, "royalblue"), ("C1 common", c1_common, "gray")],
+            [("C2 isolated", c2_iso, "darkorange"), ("C2 common", c2_common, "gray")],
+            [("A1", a1, "royalblue"), ("A2", a2, "darkorange")],
+            [("A1 ⊗ C1", trusted1, "royalblue"), ("A2 ⊗ C2", trusted2, "darkorange")],
+            [
+                ("C_F", c_f, "purple"),
+                ("common ABF", common_abf, "gray"),
+                ("availability support", support, "green"),
+                ("track trust", track_trust, "red"),
+            ],
+            [("H1 = A1 ∧ C1", h1, "royalblue"), ("H2 = A2 ∧ C2", h2, "darkorange")],
+            [("C1|2", c12, "royalblue"), ("C1|∅ sim", c1ref, "deepskyblue")],
+            [("C2|1", c21, "darkorange"), ("C2|∅ sim", c2ref, "gold")],
+        ]
+
+    fig = make_subplots(
+        rows=4,
+        cols=4,
+        specs=[
+            [{"type": "xy", "rowspan": 4, "colspan": 2}, None, {"type": "ternary"}, {"type": "ternary"}],
+            [None, None, {"type": "ternary"}, {"type": "ternary"}],
+            [None, None, {"type": "ternary"}, {"type": "ternary"}],
+            [None, None, {"type": "ternary"}, {"type": "ternary"}],
+        ],
+        subplot_titles=[
+            "Track follow view",
+            "Sensor 1 consistency",
+            "Sensor 2 consistency",
+            "Availability",
+            "Availability-discounted consistency",
+            "Central / system / track",
+            "Operational sensor path",
+            "Conditional Sensor 1",
+            "Conditional Sensor 2",
+        ],
+        horizontal_spacing=0.05,
+        vertical_spacing=0.08,
+    )
+
+    def tracking_traces(step: int):
+        current_state = result.track[step]
+        center = _position_xy(current_state)
+        first_step = max(0, step - int(ANIMATION_TAIL_STEPS) + 1)
+
+        track_xy = np.asarray(
+            [_position_xy(state) for state in result.track[first_step:step + 1]],
+            dtype=float,
         )
-        for trace in plotter.fig.data[before:]:
-            trace.name = f"Sensor {sensor_id} measurements"
-            if hasattr(trace, "marker"):
-                trace.marker.color = colour
+        track_rel = track_xy - center
 
-    plotter.plot_tracks(
-        sanitise_track_covariance(result.track),
-        [0, 2],
-        uncertainty=True,
-    )
+        truth_points = []
+        for timestamp in result.event_timestamps[first_step:step + 1]:
+            truth_state = truth_by_timestamp.get(timestamp)
+            if truth_state is not None:
+                truth_points.append(_position_xy(truth_state))
+        truth_rel = (
+            np.asarray(truth_points, dtype=float) - center
+            if truth_points
+            else np.empty((0, 2), dtype=float)
+        )
 
-    mode = (
-        "fully synchronous 10 Hz special case"
-        if SYNCHRONOUS_SENSOR_SPECIAL_CASE
-        else "asynchronous: sensor 1 at 10 Hz, sensor 2 at 12.5 Hz"
+        current_timestamp = result.event_timestamps[step]
+        first_timestamp = result.event_timestamps[first_step]
+        measurement_xy = {}
+        for sensor_id, records in measurement_records.items():
+            points = [
+                [x, y]
+                for timestamp, x, y in records
+                if first_timestamp <= timestamp <= current_timestamp
+            ]
+            measurement_xy[sensor_id] = (
+                np.asarray(points, dtype=float) - center
+                if points
+                else np.empty((0, 2), dtype=float)
+            )
+
+        ellipse_x, ellipse_y = _covariance_ellipse_relative(current_state)
+
+        return [
+            go.Scatter(
+                x=truth_rel[:, 0] if len(truth_rel) else [],
+                y=truth_rel[:, 1] if len(truth_rel) else [],
+                mode="lines",
+                line=dict(color="black", width=2),
+                name="Ground truth",
+            ),
+            go.Scatter(
+                x=track_rel[:, 0],
+                y=track_rel[:, 1],
+                mode="lines+markers",
+                line=dict(color="crimson", width=2.5),
+                marker=dict(size=4),
+                name="Central track",
+            ),
+            go.Scatter(
+                x=measurement_xy[1][:, 0] if len(measurement_xy[1]) else [],
+                y=measurement_xy[1][:, 1] if len(measurement_xy[1]) else [],
+                mode="markers",
+                marker=dict(size=5, color="royalblue", opacity=0.6),
+                name="Sensor 1 measurements",
+            ),
+            go.Scatter(
+                x=measurement_xy[2][:, 0] if len(measurement_xy[2]) else [],
+                y=measurement_xy[2][:, 1] if len(measurement_xy[2]) else [],
+                mode="markers",
+                marker=dict(size=5, color="darkorange", opacity=0.6),
+                name="Sensor 2 measurements",
+            ),
+            go.Scatter(
+                x=ellipse_x,
+                y=ellipse_y,
+                mode="lines",
+                line=dict(color="crimson", width=1.5, dash="dot"),
+                name="Track 2σ covariance",
+            ),
+            go.Scatter(
+                x=[0.0],
+                y=[0.0],
+                mode="markers",
+                marker=dict(size=11, color="crimson", symbol="x"),
+                name="Current track",
+            ),
+        ]
+
+    initial_step = frame_steps[0]
+    dynamic_indices = []
+
+    for trace in tracking_traces(initial_step):
+        fig.add_trace(trace, row=1, col=1)
+        dynamic_indices.append(len(fig.data) - 1)
+
+    ternary_positions = [
+        (1, 3), (1, 4),
+        (2, 3), (2, 4),
+        (3, 3), (3, 4),
+        (4, 3), (4, 4),
+    ]
+    for entries, (row, col) in zip(opinion_panels(initial_step), ternary_positions):
+        fig.add_trace(_ternary_marker_trace(go, entries), row=row, col=col)
+        dynamic_indices.append(len(fig.data) - 1)
+
+    fig.update_xaxes(
+        range=[-ANIMATION_HALF_WIDTH_M, ANIMATION_HALF_WIDTH_M],
+        autorange=False,
+        title_text="relative x [m]",
+        row=1,
+        col=1,
     )
-    plotter.fig.update_layout(
+    fig.update_yaxes(
+        range=[-ANIMATION_HALF_HEIGHT_M, ANIMATION_HALF_HEIGHT_M],
+        autorange=False,
+        title_text="relative y [m]",
+        scaleanchor="x",
+        scaleratio=1,
+        row=1,
+        col=1,
+    )
+    _configure_ternary_axes(fig)
+
+    if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+        rate_mode = "synchronous"
+    elif CROSS_CONTAMINATION_RATE_STRESS_TEST:
+        rate_mode = "cross-contamination stress"
+    else:
+        rate_mode = "asynchronous multi-rate"
+
+    model_label = "CT/UKF" if USE_CT_MODEL else "CV/KF"
+    static_annotations = [
+        annotation.to_plotly_json()
+        for annotation in (fig.layout.annotations or [])
+    ]
+
+    fig.update_layout(
         title=(
-            "Dynamic event-based multi-sensor Kalman-filter scenario"
-            f"<br><sup>{mode}</sup>"
+            "Dynamic event-based multi-sensor self-assessment"
+            f"<br><sup>{rate_mode}; S1={SENSOR_1_RATE_HZ:g} Hz, "
+            f"S2={SENSOR_2_RATE_HZ:g} Hz; filter={model_label}</sup>"
         ),
-        height=850,
+        width=1750,
+        height=1050,
+        margin=dict(t=115, b=110, l=60, r=30),
+        annotations=static_annotations + [
+            _disturbance_annotation(
+                initial_step,
+                float(result.event_times_s[initial_step]),
+            )
+        ],
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.06,
+            xanchor="left",
+            x=0.0,
+        ),
     )
-    plotter.fig.show(renderer="browser")
+
+    frames = []
+    for step in frame_steps:
+        frame_data = tracking_traces(step)
+        for entries in opinion_panels(step):
+            frame_data.append(_ternary_marker_trace(go, entries))
+
+        frames.append(
+            go.Frame(
+                name=str(int(step)),
+                data=frame_data,
+                traces=dynamic_indices,
+                layout=go.Layout(
+                    annotations=static_annotations + [
+                        _disturbance_annotation(
+                            step,
+                            float(result.event_times_s[step]),
+                        )
+                    ]
+                ),
+            )
+        )
+    fig.frames = tuple(frames)
+
+    slider_steps = [
+        dict(
+            method="animate",
+            args=[
+                [str(int(step))],
+                dict(
+                    mode="immediate",
+                    frame=dict(duration=0, redraw=True),
+                    transition=dict(duration=0),
+                ),
+            ],
+            label=str(int(step)),
+        )
+        for step in frame_steps
+    ]
+
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                x=0.0,
+                y=-0.095,
+                xanchor="left",
+                yanchor="top",
+                buttons=[
+                    dict(
+                        label="Play",
+                        method="animate",
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(
+                                    duration=ANIMATION_FRAME_DURATION_MS,
+                                    redraw=True,
+                                ),
+                                transition=dict(duration=0),
+                                fromcurrent=True,
+                                mode="immediate",
+                            ),
+                        ],
+                    ),
+                    dict(
+                        label="Stop",
+                        method="animate",
+                        args=[
+                            [None],
+                            dict(
+                                frame=dict(duration=0, redraw=True),
+                                transition=dict(duration=0),
+                                mode="immediate",
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        ],
+        sliders=[
+            dict(
+                steps=slider_steps,
+                currentvalue=dict(prefix="Step: "),
+                pad=dict(t=35),
+            )
+        ],
+    )
+
+    output_path = SCRIPT_DIR / ANIMATION_HTML_FILENAME
+    fig.write_html(
+        str(output_path),
+        include_plotlyjs=True,
+        auto_open=ANIMATION_AUTO_OPEN_BROWSER,
+    )
+    print(f"Dynamic animation written to: {output_path}")
 
 
 # =============================================================================
@@ -2572,7 +3214,7 @@ def print_summary(result: ProcessingResult) -> None:
     )
     for interval, label in (
         (OUTLIER_INTERVAL_S, "S1 outliers"),
-        (INCREASED_MEAS_X_INTERVAL_S, "S1 increased x-noise"),
+        (SENSOR_1_BIAS_INTERVAL_S, "S1 +3 m x-bias"),
         (DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise"),
         (TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian"),
     ):
@@ -2628,7 +3270,8 @@ def print_summary(result: ProcessingResult) -> None:
     print("  C_s^common   : same PIT/TEF mapping but central common prior")
     print("  A_s           : expected output availability")
     print("  A_s (*) C_s   : availability-trust-discounted interpretation")
-    print("  C_{s|j}       : conditional consistency after virtual update with sensor j")
+    print("  C_{s|empty}^{sim}: matched simultaneous common-prior reference")
+    print("  C_{s|j}       : same simultaneous channel after virtual update with sensor j")
     print("  C_F           : direct consistency of the actually used central measurement batch")
     print("  H_s=A_s AND C_s: optional operational sensor-path diagnostic")
     print("  sensor support : availability-only system requirement (ANY/ALL)")
@@ -2644,8 +3287,15 @@ def main() -> None:
                 "NOTE: Sensor-2 dropout is enabled. Disable it for the pure "
                 "synchronous limiting-case reproduction."
             )
+    elif CROSS_CONTAMINATION_RATE_STRESS_TEST:
+        print(
+            "V3 ASYNCHRONOUS CROSS-CONTAMINATION STRESS TEST: "
+            f"disturbed Sensor 1 = {SENSOR_1_RATE_HZ:g} Hz, "
+            f"nominal Sensor 2 = {SENSOR_2_RATE_HZ:g} Hz"
+        )
     else:
-        print("V3 ASYNCHRONOUS MULTI-RATE CASE: Sensor 1 = 10 Hz, Sensor 2 = 12.5 Hz")
+        print(f"V3 ASYNCHRONOUS MULTI-RATE CASE: Sensor 1 = {SENSOR_1_RATE_HZ:g} Hz, Sensor 2 = {SENSOR_2_RATE_HZ:g} Hz")
+    print(f"Filter motion model: {'CT' if USE_CT_MODEL else 'CV'}")
     print("=" * 88)
 
     scenario = build_scenario()
