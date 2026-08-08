@@ -362,7 +362,11 @@ MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR = 4.0
 #   next disturbance starts at 90 s.
 SENSOR_2_DROPOUT_INTERVAL_S = (70.0, 80.0)
 
-TRUNCATED_GAUSSIAN_INTERVAL_S = (90.0, 100.0)
+# Shape-only measurement-noise disturbance for Sensor 1:
+# mean and covariance remain exactly the nominal model assumptions,
+# E[v] = 0 and Cov[v] = R, but the samples are uniform instead of Gaussian.
+# This separates a violated distributional assumption from a wrong R matrix.
+VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S = (90.0, 100.0)
 TURN_INTERVAL_S = (110.0, 120.0)
 
 # Final process-noise mismatch now affects BOTH x and y process components.
@@ -377,7 +381,7 @@ DISTURBANCE_INTERVALS = [
         "tab:blue",
     ),
     (*SENSOR_2_DROPOUT_INTERVAL_S, "S2 unavailable", "tab:gray"),
-    (*TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian", "tab:purple"),
+    (*VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, "S1 variance-matched non-Gaussian noise", "tab:purple"),
     (*TURN_INTERVAL_S, "common motion-model mismatch", "tab:green"),
     (*INCREASED_PROCESS_XY_INTERVAL_S, "common increased x/y process noise", "tab:brown"),
 ]
@@ -425,21 +429,24 @@ def robust_cholesky(matrix: np.ndarray) -> np.ndarray:
     )
 
 
-def sample_truncated_gaussian_noise_from_cov(
+def sample_variance_matched_uniform_noise_from_cov(
     covariance: np.ndarray,
     rng: np.random.Generator,
-    truncation_sigma: float = 1.0,
 ) -> np.ndarray:
+    """Sample zero-mean non-Gaussian noise with exactly the target covariance.
+
+    Let u_i ~ U(-sqrt(3), sqrt(3)). Then E[u] = 0 and Cov[u] = I.
+    With L L^T = covariance, v = L u therefore satisfies
+    E[v] = 0 and Cov[v] = covariance while remaining non-Gaussian.
+    """
     covariance = np.asarray(covariance, dtype=float)
-    sigma = np.sqrt(np.diag(covariance))
-    noise = np.zeros(covariance.shape[0])
-    for dimension in range(covariance.shape[0]):
-        while True:
-            candidate = rng.normal(0.0, sigma[dimension])
-            if abs(candidate) <= truncation_sigma * sigma[dimension]:
-                noise[dimension] = candidate
-                break
-    return noise.reshape(-1, 1)
+    chol = robust_cholesky(covariance)
+    unit_variance_uniform = rng.uniform(
+        -np.sqrt(3.0),
+        np.sqrt(3.0),
+        size=(covariance.shape[0], 1),
+    )
+    return chol @ unit_variance_uniform
 
 
 # =============================================================================
@@ -1569,12 +1576,14 @@ def generate_sensor_schedule(
         if (
             definition.disturb_measurements
             and ACTIVATE_DISTURBANCES
-            and TRUNCATED_GAUSSIAN_INTERVAL_S[0]
+            and VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S[0]
             <= elapsed_s
-            < TRUNCATED_GAUSSIAN_INTERVAL_S[1]
+            < VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S[1]
         ):
+            # Deliberately violate ONLY the Gaussian shape assumption:
+            # the filter's assumed R remains correct in mean/covariance.
             measurement_vector = true_model.function(state, noise=False)
-            measurement_vector += sample_truncated_gaussian_noise_from_cov(
+            measurement_vector += sample_variance_matched_uniform_noise_from_cov(
                 np.asarray(true_model.noise_covar, dtype=float), rng
             )
         else:
@@ -3540,7 +3549,7 @@ def print_summary(result: ProcessingResult) -> None:
         (OUTLIER_INTERVAL_S, "S1 outliers"),
         (SENSOR_1_BIAS_INTERVAL_S, f"S1 +{SENSOR_1_BIAS_VECTOR_M[0]:g} m x-bias"),
         (INCREASED_MEAS_XY_INTERVAL_S, f"S1 increased x/y-noise (R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})"),
-        (TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian"),
+        (VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, "S1 variance-matched non-Gaussian noise"),
     ):
         iso = interval_mean(s2_iso.event_times_s, s2_iso_d_norm, interval)
         common = interval_mean(
