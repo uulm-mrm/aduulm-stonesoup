@@ -335,7 +335,13 @@ OUTLIER_INTERVAL_S = (10.0, 20.0)
 SENSOR_1_BIAS_INTERVAL_S = (30.0, 40.0)
 SENSOR_1_BIAS_VECTOR_M = np.array([2.0, 0.0], dtype=float)
 
-DECREASED_MEAS_XY_INTERVAL_S = (50.0, 60.0)
+INCREASED_MEAS_XY_INTERVAL_S = (50.0, 60.0)
+
+# Moderate but clearly interpretable sensor degradation:
+# multiply the TRUE measurement-noise covariance by 4. This doubles the
+# per-component standard deviation while the filter continues assuming the
+# nominal covariance.
+MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR = 4.0
 
 # Explicit 10 s nominal gap before and after the dropout:
 #   previous disturbance ends at 60 s,
@@ -352,7 +358,11 @@ INCREASED_PROCESS_XY_INTERVAL_S = (130.0, 150.0)
 DISTURBANCE_INTERVALS = [
     (*OUTLIER_INTERVAL_S, "S1 outliers", "tab:red"),
     (*SENSOR_1_BIAS_INTERVAL_S, f"S1 + {int(SENSOR_1_BIAS_VECTOR_M[0])}m x-bias", "tab:orange"),
-    (*DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise", "tab:blue"),
+    (
+        *INCREASED_MEAS_XY_INTERVAL_S,
+        f"S1 increased x/y-noise (R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})",
+        "tab:blue",
+    ),
     (*SENSOR_2_DROPOUT_INTERVAL_S, "S2 unavailable", "tab:gray"),
     (*TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian", "tab:purple"),
     (*TURN_INTERVAL_S, "common motion-model mismatch", "tab:green"),
@@ -1389,7 +1399,14 @@ def generate_sensor_schedule(
         noise_covar=np.eye(2) * definition.variance,
     )
 
-    disturbance_factor = 2 if ACTIVATE_DISTURBANCES else 1
+    # The third disturbance uses its own physically interpretable covariance
+    # factor. The helper is stateful, so the inverse factor restores the
+    # nominal covariance at the end of the interval.
+    measurement_noise_factor = (
+        MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR
+        if ACTIVATE_DISTURBANCES
+        else 1.0
+    )
 
     # disturbance_measurement_noise() was originally called once per sample
     # with a strictly increasing sample index k.  Therefore all disturbance
@@ -1404,13 +1421,13 @@ def generate_sensor_schedule(
         "parameters": [
             [
                 [
-                    sensor_step(DECREASED_MEAS_XY_INTERVAL_S[0]),
-                    1.0 / disturbance_factor,
+                    sensor_step(INCREASED_MEAS_XY_INTERVAL_S[0]),
+                    measurement_noise_factor,
                     [1, 1],
                 ],
                 [
-                    sensor_step(DECREASED_MEAS_XY_INTERVAL_S[1]),
-                    disturbance_factor,
+                    sensor_step(INCREASED_MEAS_XY_INTERVAL_S[1]),
+                    1.0 / measurement_noise_factor,
                     [1, 1],
                 ],
             ],
@@ -3368,8 +3385,8 @@ def print_summary(result: ProcessingResult) -> None:
     )
     for interval, label in (
         (OUTLIER_INTERVAL_S, "S1 outliers"),
-        (SENSOR_1_BIAS_INTERVAL_S, "S1 +3 m x-bias"),
-        (DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise"),
+        (SENSOR_1_BIAS_INTERVAL_S, f"S1 +{SENSOR_1_BIAS_VECTOR_M[0]:g} m x-bias"),
+        (INCREASED_MEAS_XY_INTERVAL_S, f"S1 increased x/y-noise (R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})"),
         (TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian"),
     ):
         iso = interval_mean(s2_iso.event_times_s, s2_iso_d_norm, interval)
