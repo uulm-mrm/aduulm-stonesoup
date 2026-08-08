@@ -112,6 +112,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.linalg import block_diag
 from scipy.stats import chi2, norm
+from math import ceil
 
 import subjective_logic as sl
 
@@ -158,7 +159,7 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 
 # False: asynchronous/multi-rate case.
 # True: limiting case; both sensors are sampled on the 10 Hz grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
 
 # Optional dedicated stress test for cross-source prior contamination.
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
@@ -192,14 +193,31 @@ SHOW_POSITION_ERROR = True
 
 # Dynamic Plotly dashboard; the slider uses integer union-event steps.
 ANIMATION_FRAME_STRIDE = 5
+ANIMATION_MAX_FRAMES = 400
 ANIMATION_FRAME_DURATION_MS = 70
-ANIMATION_TAIL_STEPS = 60
+
+# Fixed tail during playback. This keeps each frame approximately constant in
+# complexity so the animation does not become slower towards the end.
+ANIMATION_TAIL_STEPS = 70
+
+# The final frame is a separate overview: show the complete truth/track route
+# once and automatically fit the axes around it.
+
+ANIMATION_FINAL_SHOW_FULL_ROUTE = True
+ANIMATION_FINAL_ROUTE_MARGIN = 0.06
+
 ANIMATION_HALF_WIDTH_M = 18.0
 ANIMATION_HALF_HEIGHT_M = 18.0
+
+# Match Stone Soup's standard 2D uncertainty ellipse:
+# width = 2*sqrt(lambda_max), height = 2*sqrt(lambda_min).
+# This is the Mahalanobis-distance-1 covariance contour, not a 95% ellipse.
+ANIMATION_COVARIANCE_SCALE = 1.0
+
 ANIMATION_AUTO_OPEN_BROWSER = True
 ANIMATION_HTML_FILENAME = "multi_sensor_selfassessment_animation.html"
 
-ACTIVATE_DISTURBANCES = False
+ACTIVATE_DISTURBANCES = True
 DISTURB_SENSOR_1 = True
 DISTURB_SENSOR_2 = False
 
@@ -209,6 +227,11 @@ DISTURB_SENSOR_2 = False
 # The ground-truth generator stays 4D, as in the old V7 script.
 USE_CT_MODEL = False
 CT_TURN_RATE_NOISE = 0.01
+
+# Keep the coordinated turn in the ground truth independently of the other
+# fault switches. For CV this creates the intended model mismatch. For CT it
+# is a maneuver that the chosen filter model can represent.
+ENABLE_GROUND_TRUTH_TURN = True
 
 # Optional original Griebel reference.  "auto" uses KalmanSelfAssessor when
 # available and otherwise falls back to a non-crashing placeholder.
@@ -238,8 +261,8 @@ TRUTH_DT_S = 1.0 / TRUTH_RATE_HZ
 
 Q_X = 0.25
 Q_Y = 0.25
-MEASUREMENT_VARIANCE_SENSOR_1 = 1.0
-MEASUREMENT_VARIANCE_SENSOR_2 = 1.0
+MEASUREMENT_VARIANCE_SENSOR_1 = 0.1
+MEASUREMENT_VARIANCE_SENSOR_2 = 0.1
 
 NUM_PIT_BINS = 7
 
@@ -261,7 +284,7 @@ AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 # Conditional/update-order opinions are only updated at simultaneous sensor
 # timestamps. They therefore need a longer physical horizon to accumulate
 # enough PIT observations.
-CONDITIONAL_SHORT_TERM_HORIZON_S = 10.0
+CONDITIONAL_SHORT_TERM_HORIZON_S = 5.0
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
@@ -293,7 +316,6 @@ GRIEBEL_TRUST_DISCOUNT = 0.99
 GRIEBEL_OVERALL_WINDOW = 35
 
 ASSUME_DETECTION_PROBABILITY_ONE = True
-ANIMATION_TAIL_LENGTH = 0.20
 NOMINAL_BURN_IN_S = CONSISTENCY_SHORT_TERM_HORIZON_S
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -311,7 +333,7 @@ OUTLIER_INTERVAL_S = (10.0, 20.0)
 # Replaces the previous "increased x measurement noise" disturbance.
 # The bias is applied only to Sensor 1 and only to the x measurement component.
 SENSOR_1_BIAS_INTERVAL_S = (30.0, 40.0)
-SENSOR_1_BIAS_VECTOR_M = np.array([3.0, 0.0], dtype=float)
+SENSOR_1_BIAS_VECTOR_M = np.array([2.0, 0.0], dtype=float)
 
 DECREASED_MEAS_XY_INTERVAL_S = (50.0, 60.0)
 
@@ -329,7 +351,7 @@ INCREASED_PROCESS_XY_INTERVAL_S = (130.0, 150.0)
 
 DISTURBANCE_INTERVALS = [
     (*OUTLIER_INTERVAL_S, "S1 outliers", "tab:red"),
-    (*SENSOR_1_BIAS_INTERVAL_S, "S1 +3 m x-bias", "tab:orange"),
+    (*SENSOR_1_BIAS_INTERVAL_S, f"S1 + {int(SENSOR_1_BIAS_VECTOR_M[0])}m x-bias", "tab:orange"),
     (*DECREASED_MEAS_XY_INTERVAL_S, "S1 decreased x/y-noise", "tab:blue"),
     (*SENSOR_2_DROPOUT_INTERVAL_S, "S2 unavailable", "tab:gray"),
     (*TRUNCATED_GAUSSIAN_INTERVAL_S, "S1 truncated Gaussian", "tab:purple"),
@@ -1314,7 +1336,7 @@ def generate_truth(start_time: datetime) -> GroundTruthPath:
         )
         active_model = (
             right_turn_model
-            if ACTIVATE_DISTURBANCES and turn_start <= step < turn_end
+            if ENABLE_GROUND_TRUTH_TURN and turn_start <= step < turn_end
             else cv_model
         )
         truth.append(
@@ -2089,6 +2111,8 @@ def add_disturbance_spans(axis) -> None:
     for start_s, end_s, label, colour in DISTURBANCE_INTERVALS:
         if label == "S2 unavailable" and not ENABLE_SENSOR_2_DROPOUT:
             continue
+        if label == "common motion-model mismatch" and not ENABLE_GROUND_TRUTH_TURN:
+            continue
         axis.axvspan(start_s, end_s, color=colour, alpha=0.07)
 
 
@@ -2098,6 +2122,12 @@ def is_nominal_time(time_s: float) -> bool:
     for start, end, label, _ in DISTURBANCE_INTERVALS:
         if label == "S2 unavailable" and not ENABLE_SENSOR_2_DROPOUT:
             continue
+        if label == "common motion-model mismatch":
+            if not ENABLE_GROUND_TRUTH_TURN:
+                continue
+            if USE_CT_MODEL:
+                # The same ground-truth turn is nominal for the CT filter.
+                continue
         if start <= time_s < end:
             return False
     return True
@@ -2690,12 +2720,36 @@ def _ternary_marker_trace(go, entries, marker_size: int = 12):
 
 
 def _configure_ternary_axes(fig) -> None:
+    """Same ternary appearance as 01_KalmanFilterWithSelfAssessmentV7."""
     for key in [key for key in fig.layout if str(key).startswith("ternary")]:
         fig.layout[key].update(
             sum=1,
-            aaxis=dict(title="uncertainty", min=0, gridcolor="rgba(100,100,100,0.3)"),
-            baxis=dict(title="disbelief", min=0, gridcolor="rgba(100,100,100,0.3)"),
-            caxis=dict(title="belief", min=0, gridcolor="rgba(100,100,100,0.3)"),
+            # V7 relies on Plotly's standard light-blue plotting background.
+            bgcolor="#E5ECF6",
+            aaxis=dict(
+                title="uncertainty",
+                showgrid=True,
+                gridcolor="black",
+                ticks="",
+                linecolor="rgba(0,0,0,0)",
+                showticklabels=False,
+            ),
+            baxis=dict(
+                title="disbelief",
+                showgrid=True,
+                gridcolor="black",
+                ticks="",
+                linecolor="rgba(0,0,0,0)",
+                showticklabels=False,
+            ),
+            caxis=dict(
+                title="belief",
+                showgrid=True,
+                gridcolor="black",
+                ticks="",
+                linecolor="rgba(0,0,0,0)",
+                showticklabels=False,
+            ),
         )
 
 
@@ -2724,15 +2778,19 @@ def _active_disturbance_labels(elapsed_s: float) -> list[str]:
     ):
         labels.append("S2 unavailable")
 
-    if ACTIVATE_DISTURBANCES:
-        if TURN_INTERVAL_S[0] <= elapsed_s < TURN_INTERVAL_S[1]:
-            labels.append("common motion-model mismatch")
-        if (
-            INCREASED_PROCESS_XY_INTERVAL_S[0]
-            <= elapsed_s
-            < INCREASED_PROCESS_XY_INTERVAL_S[1]
-        ):
-            labels.append("common increased x/y process noise")
+    if (
+        ENABLE_GROUND_TRUTH_TURN
+        and not USE_CT_MODEL
+        and TURN_INTERVAL_S[0] <= elapsed_s < TURN_INTERVAL_S[1]
+    ):
+        labels.append("common motion-model mismatch (coordinated turn)")
+
+    if ACTIVATE_DISTURBANCES and (
+        INCREASED_PROCESS_XY_INTERVAL_S[0]
+        <= elapsed_s
+        < INCREASED_PROCESS_XY_INTERVAL_S[1]
+    ):
+        labels.append("common increased x/y process noise")
 
     return labels
 
@@ -2784,7 +2842,7 @@ def _position_xy(state) -> np.ndarray:
 
 def _covariance_ellipse_relative(
     state,
-    sigma_scale: float = 2.0,
+    sigma_scale: float = ANIMATION_COVARIANCE_SCALE,
     n_points: int = 60,
 ):
     covariance = np.asarray(state.covar, dtype=float)
@@ -2811,10 +2869,21 @@ def show_dynamic_animation(
         return
 
     all_steps = list(range(len(result.event_timestamps)))
-    stride = max(1, int(ANIMATION_FRAME_STRIDE))
+    requested_stride = max(1, int(ANIMATION_FRAME_STRIDE))
+    stride_for_frame_cap = max(
+        1,
+        int(ceil(len(all_steps) / max(1, int(ANIMATION_MAX_FRAMES)))),
+    )
+    stride = max(requested_stride, stride_for_frame_cap)
     frame_steps = all_steps[::stride]
     if frame_steps[-1] != all_steps[-1]:
         frame_steps.append(all_steps[-1])
+
+    print(
+        "Animation frames: "
+        f"{len(frame_steps)} / {len(all_steps)} union-event steps "
+        f"(effective stride={stride})"
+    )
 
     truth_by_timestamp = {state.timestamp: state for state in scenario.truth}
     measurement_records = {}
@@ -2884,29 +2953,99 @@ def show_dynamic_animation(
             "Sensor 1 consistency",
             "Sensor 2 consistency",
             "Availability",
-            "Availability-discounted consistency",
+            "Availability-discounted",
             "Central / system / track",
             "Operational sensor path",
             "Conditional Sensor 1",
             "Conditional Sensor 2",
         ],
-        horizontal_spacing=0.05,
-        vertical_spacing=0.08,
+        horizontal_spacing=0.04,
+        vertical_spacing=0.05,
     )
+
+    # V7 shifts opinion titles in paper coordinates to the left and down.
+    for annotation in fig.layout.annotations:
+        if annotation.text == "Track follow view":
+            annotation.update(font=dict(size=15))
+        else:
+            annotation.update(
+                x=annotation.x - 0.10,
+                y=annotation.y - 0.05,
+                xanchor="left",
+                align="left",
+                font=dict(size=14),
+            )
+
+    final_step = len(result.event_timestamps) - 1
+
+    def _route_first_step(step: int) -> int:
+        if ANIMATION_FINAL_SHOW_FULL_ROUTE and step == final_step:
+            return 0
+        return max(0, step - int(ANIMATION_TAIL_STEPS) + 1)
+
+    def _tracking_axis_ranges(step: int):
+        if not (ANIMATION_FINAL_SHOW_FULL_ROUTE and step == final_step):
+            return (
+                [-ANIMATION_HALF_WIDTH_M, ANIMATION_HALF_WIDTH_M],
+                [-ANIMATION_HALF_HEIGHT_M, ANIMATION_HALF_HEIGHT_M],
+            )
+
+        center = _position_xy(result.track[step])
+        point_sets = [
+            np.asarray(
+                [_position_xy(state) for state in result.track[: step + 1]],
+                dtype=float,
+            ) - center
+        ]
+
+        truth_points_full = []
+        for timestamp in result.event_timestamps[: step + 1]:
+            truth_state = truth_by_timestamp.get(timestamp)
+            if truth_state is not None:
+                truth_points_full.append(_position_xy(truth_state))
+        if truth_points_full:
+            point_sets.append(
+                np.asarray(truth_points_full, dtype=float) - center
+            )
+
+        all_points = np.vstack(point_sets)
+        x_min, y_min = np.min(all_points, axis=0)
+        x_max, y_max = np.max(all_points, axis=0)
+        full_span = max(float(x_max - x_min), float(y_max - y_min), 1.0)
+
+        half_span = (
+            0.5
+            * full_span
+            * (1.0 + 2.0 * float(ANIMATION_FINAL_ROUTE_MARGIN))
+        )
+        x_mid = 0.5 * float(x_min + x_max)
+        y_mid = 0.5 * float(y_min + y_max)
+
+        return (
+            [x_mid - half_span, x_mid + half_span],
+            [y_mid - half_span, y_mid + half_span],
+        )
 
     def tracking_traces(step: int):
         current_state = result.track[step]
         center = _position_xy(current_state)
-        first_step = max(0, step - int(ANIMATION_TAIL_STEPS) + 1)
+
+        route_first_step = _route_first_step(step)
+        measurement_first_step = max(
+            0, step - int(ANIMATION_TAIL_STEPS) + 1
+        )
 
         track_xy = np.asarray(
-            [_position_xy(state) for state in result.track[first_step:step + 1]],
+            [
+                _position_xy(state)
+                for state in result.track[route_first_step : step + 1]
+            ],
             dtype=float,
         )
         track_rel = track_xy - center
 
         truth_points = []
-        for timestamp in result.event_timestamps[first_step:step + 1]:
+        for timestamp in result.event_timestamps[route_first_step : step + 1]:
             truth_state = truth_by_timestamp.get(timestamp)
             if truth_state is not None:
                 truth_points.append(_position_xy(truth_state))
@@ -2917,7 +3056,7 @@ def show_dynamic_animation(
         )
 
         current_timestamp = result.event_timestamps[step]
-        first_timestamp = result.event_timestamps[first_step]
+        first_timestamp = result.event_timestamps[measurement_first_step]
         measurement_xy = {}
         for sensor_id, records in measurement_records.items():
             points = [
@@ -2934,29 +3073,28 @@ def show_dynamic_animation(
         ellipse_x, ellipse_y = _covariance_ellipse_relative(current_state)
 
         return [
-            go.Scatter(
+            go.Scattergl(
                 x=truth_rel[:, 0] if len(truth_rel) else [],
                 y=truth_rel[:, 1] if len(truth_rel) else [],
                 mode="lines",
                 line=dict(color="black", width=2),
                 name="Ground truth",
             ),
-            go.Scatter(
+            go.Scattergl(
                 x=track_rel[:, 0],
                 y=track_rel[:, 1],
-                mode="lines+markers",
+                mode="lines",
                 line=dict(color="crimson", width=2.5),
-                marker=dict(size=4),
                 name="Central track",
             ),
-            go.Scatter(
+            go.Scattergl(
                 x=measurement_xy[1][:, 0] if len(measurement_xy[1]) else [],
                 y=measurement_xy[1][:, 1] if len(measurement_xy[1]) else [],
                 mode="markers",
                 marker=dict(size=5, color="royalblue", opacity=0.6),
                 name="Sensor 1 measurements",
             ),
-            go.Scatter(
+            go.Scattergl(
                 x=measurement_xy[2][:, 0] if len(measurement_xy[2]) else [],
                 y=measurement_xy[2][:, 1] if len(measurement_xy[2]) else [],
                 mode="markers",
@@ -2968,13 +3106,13 @@ def show_dynamic_animation(
                 y=ellipse_y,
                 mode="lines",
                 line=dict(color="crimson", width=1.5, dash="dot"),
-                name="Track 2σ covariance",
+                name="Track uncertainty ellipse",
             ),
-            go.Scatter(
+            go.Scattergl(
                 x=[0.0],
                 y=[0.0],
                 mode="markers",
-                marker=dict(size=11, color="crimson", symbol="x"),
+                marker=dict(size=8, color="crimson", symbol="x"),
                 name="Current track",
             ),
         ]
@@ -2996,15 +3134,16 @@ def show_dynamic_animation(
         fig.add_trace(_ternary_marker_trace(go, entries), row=row, col=col)
         dynamic_indices.append(len(fig.data) - 1)
 
+    initial_x_range, initial_y_range = _tracking_axis_ranges(initial_step)
     fig.update_xaxes(
-        range=[-ANIMATION_HALF_WIDTH_M, ANIMATION_HALF_WIDTH_M],
+        range=initial_x_range,
         autorange=False,
         title_text="relative x [m]",
         row=1,
         col=1,
     )
     fig.update_yaxes(
-        range=[-ANIMATION_HALF_HEIGHT_M, ANIMATION_HALF_HEIGHT_M],
+        range=initial_y_range,
         autorange=False,
         title_text="relative y [m]",
         scaleanchor="x",
@@ -3034,20 +3173,26 @@ def show_dynamic_animation(
             f"S2={SENSOR_2_RATE_HZ:g} Hz; filter={model_label}</sup>"
         ),
         width=1750,
-        height=1050,
-        margin=dict(t=115, b=110, l=60, r=30),
+        height=1120,
+        margin=dict(t=120, b=95, l=60, r=30),
         annotations=static_annotations + [
             _disturbance_annotation(
                 initial_step,
                 float(result.event_times_s[initial_step]),
             )
         ],
+        # The only global legend belongs to the tracking panel. Place it inside
+        # that panel so it cannot collide with the x-axis label or slider.
         legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.06,
+            orientation="v",
+            x=0.012,
+            y=0.80,
             xanchor="left",
-            x=0.0,
+            yanchor="top",
+            bgcolor="rgba(255,255,255,0.78)",
+            bordercolor="rgba(80,80,80,0.35)",
+            borderwidth=1,
+            font=dict(size=10),
         ),
     )
 
@@ -3057,18 +3202,26 @@ def show_dynamic_animation(
         for entries in opinion_panels(step):
             frame_data.append(_ternary_marker_trace(go, entries))
 
+        frame_x_range, frame_y_range = _tracking_axis_ranges(step)
         frames.append(
             go.Frame(
                 name=str(int(step)),
                 data=frame_data,
                 traces=dynamic_indices,
                 layout=go.Layout(
+                    xaxis=dict(range=frame_x_range, autorange=False),
+                    yaxis=dict(
+                        range=frame_y_range,
+                        autorange=False,
+                        scaleanchor="x",
+                        scaleratio=1,
+                    ),
                     annotations=static_annotations + [
                         _disturbance_annotation(
                             step,
                             float(result.event_times_s[step]),
                         )
-                    ]
+                    ],
                 ),
             )
         )
@@ -3096,7 +3249,7 @@ def show_dynamic_animation(
                 type="buttons",
                 showactive=False,
                 x=0.0,
-                y=-0.095,
+                y=-0.075,
                 xanchor="left",
                 yanchor="top",
                 buttons=[
@@ -3135,7 +3288,7 @@ def show_dynamic_animation(
             dict(
                 steps=slider_steps,
                 currentvalue=dict(prefix="Step: "),
-                pad=dict(t=35),
+                pad=dict(t=48),
             )
         ],
     )
@@ -3145,6 +3298,7 @@ def show_dynamic_animation(
         str(output_path),
         include_plotlyjs=True,
         auto_open=ANIMATION_AUTO_OPEN_BROWSER,
+        auto_play=False,
     )
     print(f"Dynamic animation written to: {output_path}")
 
