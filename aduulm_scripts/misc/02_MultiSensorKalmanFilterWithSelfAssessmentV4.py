@@ -25,8 +25,8 @@ assessment into clearly defined statements:
      not arrive,
    - processed by a separate TEF,
    - if an expected measurement is missing, the corresponding consistency TEFs
-     receive a VACUOUS input: no positive/negative consistency evidence is added,
-     but their temporal memory continues to advance.
+     are FROZEN: no PIT/innovation evidence is added and their opinion is kept at
+     its last evidence-supported state. Missingness is represented only by A_s.
 
 4. Availability-trust-discounted consistency C~_s = A_s (*) C_s
    - trust discount changes the downstream interpretation of C_s,
@@ -113,7 +113,7 @@ Recommended usage
    faults.
 5. Inspect matched conditional opinions C_{s|empty}^{sim} vs C_{s|j}.
 6. Inspect direct batch C_F together with the active sensor-set timeline.
-7. Enable dropout to inspect A_s, vacuous consistency updates, trust discount,
+7. Enable dropout to inspect A_s, frozen consistency opinions, trust discount,
    and the experimental track-output trust construction.
 """
 
@@ -187,12 +187,12 @@ SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
 # Sensor 1 is intentionally much faster than nominal Sensor 2, so several
 # faulty S1 updates can affect the central prior before the next S2 update.
-CROSS_CONTAMINATION_RATE_STRESS_TEST = False
+CROSS_CONTAMINATION_RATE_STRESS_TEST = True
 
 NOMINAL_SENSOR_1_RATE_HZ = 10.0
 NOMINAL_SENSOR_2_RATE_HZ = 12.5
-CROSS_CONTAMINATION_SENSOR_1_RATE_HZ = 25.0
-CROSS_CONTAMINATION_SENSOR_2_RATE_HZ = 10.0
+CROSS_CONTAMINATION_SENSOR_1_RATE_HZ = 10.0
+CROSS_CONTAMINATION_SENSOR_2_RATE_HZ = 25.0
 SYNCHRONOUS_REFERENCE_RATE_HZ = 10.0
 
 if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
@@ -206,7 +206,7 @@ else:
     SENSOR_2_RATE_HZ = NOMINAL_SENSOR_2_RATE_HZ
 
 # For a pure synchronous validation set this to False.
-ENABLE_SENSOR_2_DROPOUT = False
+ENABLE_SENSOR_2_DROPOUT = True
 
 SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
@@ -328,8 +328,8 @@ AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 # Conditional/update-order opinions are only updated at simultaneous sensor
 # timestamps. They therefore need a longer physical horizon to accumulate
 # enough PIT observations.
-CONDITIONAL_SHORT_TERM_HORIZON_S = 10.0
-DISAGREEMENT_SHORT_TERM_HORIZON_S = 10.0
+CONDITIONAL_SHORT_TERM_HORIZON_S = 5.0
+DISAGREEMENT_SHORT_TERM_HORIZON_S = 5.0
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
@@ -962,20 +962,20 @@ class SensorConsistencyState:
         timestamp: datetime,
         start_time: datetime,
     ):
-        """Advance the TEF clock without adding consistency evidence.
+        """Record a scheduled instant with no measurement while freezing C_s.
 
-        A missing expected measurement provides no innovation/PIT sample.
-        Therefore a vacuous multinomial opinion is added to each temporal
-        consistency channel. This does NOT count as evidence for consistency or
-        inconsistency; it merely lets the temporal memory age on the known
-        sensor schedule.
+        A missing expected measurement provides no innovation and therefore no
+        PIT sample.  The consistency TEFs are deliberately NOT advanced with a
+        vacuous opinion: ``latest_opinion`` remains exactly at its last
+        evidence-supported value.  Missingness is handled exclusively by the
+        separate availability opinion A_s and, downstream, by trust discount.
+
+        The current scheduled time is still recorded for plotting.  NIS/PIT are
+        NaN because the corresponding statistics are undefined without a
+        measurement.  ``latest_timestamp`` is intentionally left unchanged so
+        it continues to denote the time of the most recent actual consistency
+        evidence.
         """
-        self.tef_radial.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self.tef_x.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self.tef_y.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self._refresh_latest_opinion()
-        self.latest_timestamp = timestamp
-
         elapsed_s = (timestamp - start_time).total_seconds()
         self.event_times_s.append(elapsed_s)
         self.radial_pit_events.append(float("nan"))
@@ -1104,10 +1104,10 @@ class SensorDisagreementState:
         self.latest_opinion = fuse_weighted([radial, x_op.multiply(y_op)])
 
     def advance_without_pair(self, timestamp: datetime, start_time: datetime):
-        self.tef_radial.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self.tef_x.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self.tef_y.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self._refresh_latest_opinion()
+        """Record a scheduled pair instant without changing disagreement evidence."""
+        # No simultaneous measurement pair exists, so the pairwise diagnostic
+        # has no new statistical evidence.  Freeze its TEFs/opinion and let
+        # sensor availability carry the missing-information semantics.
         self.event_times_s.append((timestamp-start_time).total_seconds())
         self.belief_events.append(belief(self.latest_opinion)); self.disbelief_events.append(disbelief(self.latest_opinion))
         self.uncertainty_events.append(uncertainty(self.latest_opinion)); self.p_ok_events.append(p_ok(self.latest_opinion))
@@ -1265,14 +1265,11 @@ class BatchTrackAssessmentState:
         timestamp: datetime,
         start_time: datetime,
     ):
-        """Advance direct-batch TEF when a scheduled union event has no data."""
-        self.tef_radial.add(vacuous_multinomial_opinion(NUM_PIT_BINS))
-        self.latest_opinion = multinomial_to_binomial_consistency_opinion(
-            self.tef_radial.get_opinion(),
-            NUM_PIT_BINS,
-            prior_ok_value=0.5,
-        )
-
+        """Record an empty union event while freezing central consistency C_F."""
+        # With no active measurement there is no batch innovation/NIS/PIT.
+        # Therefore C_F receives no vacuous pseudo-observation and its TEF is
+        # frozen.  Any loss of trust caused by absent sensors is represented by
+        # availability support and the downstream trust discount.
         self.event_times_s.append((timestamp - start_time).total_seconds())
         self.pit_events.append(float("nan"))
         self.nis_events.append(float("nan"))
@@ -2253,8 +2250,8 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             )
             if not event.arrived:
                 # No innovation exists, so consistency must neither be rewarded
-                # nor penalised. A vacuous TEF input advances temporal memory
-                # while explicitly representing missing consistency evidence.
+                # nor penalised. Freeze the consistency TEFs/opinions; the
+                # missing-information semantics are carried only by A_s.
                 common_states[event.sensor_id].advance_without_measurement(
                     timestamp,
                     scenario.start_time,
@@ -2382,8 +2379,10 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 conditional_order_asymmetry.append(i_1_to_2 - i_2_to_1)
             else:
                 # A simultaneous comparison was scheduled but cannot be formed.
-                # Advance matched reference and conditional TEFs with vacuous
-                # information so both retain the same physical event clock.
+                # Freeze matched reference, conditional, and pair-disagreement
+                # TEFs because no statistical comparison is available. Their
+                # plotted opinions are merely held at the last evidence-supported
+                # value; availability represents the missing information.
                 if disagreement_state is not None:
                     disagreement_state.advance_without_pair(timestamp, scenario.start_time)
                 for reference_state in conditional_reference_states.values():
@@ -2430,7 +2429,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 )
         else:
             # A scheduled union event exists but no measurement is available.
-            # Keep the batch TEF on its physical event clock using no-evidence.
+            # Freeze C_F; availability support carries the loss of information.
             batch_track_state.advance_without_measurement(
                 timestamp,
                 scenario.start_time,
@@ -3976,7 +3975,7 @@ def print_summary(result: ProcessingResult) -> None:
             f"{interval_mean(a2.event_times_s, a2.p_available_events, SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
         )
         print(
-            "  mean local C2 consistency uncertainty during dropout: "
+            "  mean frozen local C2 consistency uncertainty during dropout: "
             f"{interval_mean(result.isolated_states[2].event_times_s, result.isolated_states[2].uncertainty_events, SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
         )
         print(
@@ -3989,6 +3988,7 @@ def print_summary(result: ProcessingResult) -> None:
     print("  C_s^iso      : sensor/path consistency using only that sensor history")
     print("  C_s^common   : same PIT/TEF mapping but central common prior")
     print("  A_s           : expected output availability")
+    print("  dropout       : freezes C_s/C_F diagnostics; A_s alone represents missingness")
     print("  A_s (*) C_s   : availability-trust-discounted interpretation")
     print("  C_{s|empty}^{sim}: matched simultaneous common-prior reference")
     print("  C_{s|j}       : same simultaneous channel after virtual update with sensor j")
