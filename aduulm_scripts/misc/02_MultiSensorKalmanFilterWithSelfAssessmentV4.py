@@ -55,13 +55,24 @@ assessment into clearly defined statements:
    - signed standardized x/y differences identify the RELATIVE offset direction
      but cannot tell which of two sensors is absolutely correct.
 
-8. Optional Griebel 2023 reference
+8. Optional Griebel 2023 reference and comparison layer
    - when ``KalmanSelfAssessor`` from the uulm-mrm/aduulm-stonesoup branch is
-     available, the script evaluates the published single-sensor SA mechanism
-     against the common prediction and forms the paper's projected-probability
-     overall construction from the threshold decisions,
-   - if the class is unavailable, a placeholder backend returns NaNs and the
-     complete script remains executable.
+     available, the script evaluates Griebel's native single-sensor SA mechanism
+     against the common central prediction,
+   - the available ``get_sas_measures`` interface exposes DC, uncertainty and
+     threshold, but not the complete internal sensor opinion used by the
+     published multi-source fusion.  The script therefore deliberately does NOT
+     reconstruct a pseudo-opinion and does NOT claim a native Griebel ABF curve,
+   - an optional threshold-decision aggregate is retained only as a constructed
+     decision-level diagnostic.  It is explicitly labelled as such and is never
+     interpreted as the published multi-source SL fusion,
+   - in asynchronous mode the published synchronous setup has no unique event
+     semantics. Three explicitly labelled comparison extensions are available:
+       * active_only      : use only sensors assessed at the current event,
+       * hold_last        : reuse the latest inactive-sensor decision,
+       * synchronous_only : evaluate only full simultaneous sensor batches,
+   - if the native class is unavailable, a placeholder backend keeps the whole
+     script executable.
 
 Temporal parametrisation
 ------------------------
@@ -249,14 +260,36 @@ ENABLE_GROUND_TRUTH_TURN = True
 ENABLE_GRIEBEL_REFERENCE = True
 GRIEBEL_BACKEND = "auto"  # "auto" | "native" | "placeholder"
 
-# In asynchronous mode the published 2023 method is not defined.  This switch
-# selects an explicitly labelled straightforward extension for comparison:
-# - "hold_last": update the currently active common-prior sensor SA and hold
-#   the latest decision of all inactive sensors; update overall PP each union
-#   event.  This intentionally exposes stale-opinion and unequal-rate effects.
-# - "synchronous_only": update the Griebel reference only when all sensors have
-#   a measurement at the same timestamp.
-GRIEBEL_ASYNC_EXTENSION_MODE = "hold_last"
+# In asynchronous mode the published 2023 setup does not define a unique
+# event-varying active-set semantics.  We therefore compare explicitly labelled
+# straightforward extensions rather than calling any of them the published
+# method:
+#
+# - "active_only" (recommended/default):
+#     assess every currently active sensor and ABF-fuse only the current active
+#     source set.  This avoids stale information and is the fairest best-effort
+#     asynchronous extension.
+#
+# - "hold_last":
+#     assess every active sensor but ABF-fuse the most recent assessment of all
+#     configured sensors.  This deliberately exposes stale-source semantics and
+#     is useful for rate-stress/dropout experiments.
+#
+# - "synchronous_only":
+#     update the reference only on timestamps at which all configured sensors
+#     provide a current measurement.
+GRIEBEL_ASYNC_EXTENSION_MODE = "active_only"
+
+# The public-ish KalmanSelfAssessor interface used here exposes
+# (delta, uncertainty, eta), not the complete internal SL source opinion.
+# Consequently we do NOT reconstruct an opinion after the hard threshold and
+# do NOT perform a pseudo-ABF.  That would destroy the continuous information
+# before fusion and yield a misleading binary d_norm curve.
+#
+# The optional quantity below is only a constructed, decision-level temporal
+# summary of the native threshold decisions.  Keep it for qualitative context,
+# but never label it as native Griebel multi-source ABF.
+GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP = True
 
 # Experimental output-level construction. Sensor support is derived ONLY from
 # availability, while C_s remains a local diagnostic. This avoids feeding the same
@@ -1297,6 +1330,7 @@ class GriebelMeasure:
         return bool(
             np.isfinite(self.delta)
             and np.isfinite(self.eta)
+            and np.isfinite(self.uncertainty)
         )
 
     @property
@@ -1309,11 +1343,45 @@ class GriebelMeasure:
 class GriebelReferenceBackend:
     """Adapter around the optional aduulm-stonesoup KalmanSelfAssessor.
 
-    This class deliberately uses only the public-ish interface already used in
-    the user's first-paper script: ``assess`` and ``get_sas_measures``.  The
-    overall PP reference follows the 2023 paper's threshold-decision / sliding-
-    window construction.  No attempt is made to translate Griebel's internal
-    multinomial opinions into the external ``subjective_logic`` package.
+    Native quantities
+    -----------------
+    ``assess`` and ``get_sas_measures`` are used directly.  For each evaluated
+    sensor the backend stores the native
+
+        delta_s,  u_s,  eta_s,  accepted_s = (delta_s < eta_s).
+
+    No pseudo-opinion reconstruction
+    ---------------------------------
+    The interface used here does not expose the complete internal SL source
+    opinion required to reproduce Griebel's published multi-source ABF exactly.
+    Reconstructing
+
+        accepted -> (1-u, 0, u),  rejected -> (0, 1-u, u)
+
+    after thresholding is methodologically invalid for our comparison because
+    it discards the continuous pre-threshold information; furthermore
+    d/(1-u) then collapses identically to 0 or 1.  This backend therefore does
+    NOT create or fuse such pseudo-opinions.
+
+    Constructed decision-level summary
+    ----------------------------------
+    Optionally, a sliding temporal summary of the native threshold decisions is
+    retained as a *constructed diagnostic only*.  It is useful for visually
+    comparing decision timing, but it must not be described as the published
+    multi-source SL fusion.
+
+    Asynchronous comparison semantics
+    ----------------------------------
+    ``active_only``:
+        use only native sensor decisions generated at the current union event.
+        This is the fairest best-effort asynchronous decision-level extension.
+
+    ``hold_last``:
+        use the latest decision of every configured sensor.  Source age is
+        stored explicitly; this mode is intended for stale-source/dropout stress.
+
+    ``synchronous_only``:
+        update the reference only when every configured sensor is active.
     """
 
     def __init__(self, sensor_ids: Iterable[int], dim_meas: int = 2):
@@ -1326,6 +1394,11 @@ class GriebelReferenceBackend:
         self.latest_measure = {
             sensor_id: GriebelMeasure() for sensor_id in self.sensor_ids
         }
+        self.latest_timestamp: dict[int, datetime | None] = {
+            sensor_id: None for sensor_id in self.sensor_ids
+        }
+
+        # Direct native single-sensor outputs.
         self.sensor_times = {sensor_id: [] for sensor_id in self.sensor_ids}
         self.sensor_delta = {sensor_id: [] for sensor_id in self.sensor_ids}
         self.sensor_eta = {sensor_id: [] for sensor_id in self.sensor_ids}
@@ -1333,11 +1406,14 @@ class GriebelReferenceBackend:
             sensor_id: [] for sensor_id in self.sensor_ids
         }
 
+        # Constructed decision-level temporal summary (NOT native Griebel ABF).
         self.overall_window: deque = deque(maxlen=GRIEBEL_OVERALL_WINDOW)
         self.overall_times_s: list[float] = []
         self.overall_p_ok: list[float] = []
         self.overall_uncertainty: list[float] = []
         self.overall_true_fraction: list[float] = []
+        self.overall_source_count: list[int] = []
+        self.overall_max_source_age_s: list[float] = []
 
         if not self.enabled:
             return
@@ -1374,20 +1450,52 @@ class GriebelReferenceBackend:
         elif self.status == "disabled":
             self.status = "placeholder"
 
+    @staticmethod
+    def _validate_async_mode() -> str:
+        mode = GRIEBEL_ASYNC_EXTENSION_MODE.lower()
+        valid = {"active_only", "hold_last", "synchronous_only"}
+        if mode not in valid:
+            raise ValueError(
+                "GRIEBEL_ASYNC_EXTENSION_MODE must be one of "
+                f"{sorted(valid)}, got {GRIEBEL_ASYNC_EXTENSION_MODE!r}"
+            )
+        return mode
+
     def should_update_event(
         self,
         active_sensor_ids: list[int],
     ) -> bool:
+        """Return whether native active-sensor assessors are evaluated now."""
         if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
             return True
-        if GRIEBEL_ASYNC_EXTENSION_MODE == "hold_last":
+
+        mode = self._validate_async_mode()
+        if mode in {"active_only", "hold_last"}:
             return True
-        if GRIEBEL_ASYNC_EXTENSION_MODE == "synchronous_only":
+        if mode == "synchronous_only":
             return set(active_sensor_ids) == set(self.sensor_ids)
-        raise ValueError(
-            "GRIEBEL_ASYNC_EXTENSION_MODE must be 'hold_last' or "
-            "'synchronous_only'"
-        )
+        raise AssertionError("unreachable")
+
+    def _selected_source_ids(
+        self,
+        active_sensor_ids: list[int],
+    ) -> list[int]:
+        """Source decisions used only by the constructed decision summary."""
+        if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+            return list(self.sensor_ids)
+
+        mode = self._validate_async_mode()
+        if mode == "active_only":
+            return sorted(active_sensor_ids)
+        if mode == "hold_last":
+            return list(self.sensor_ids)
+        if mode == "synchronous_only":
+            return (
+                list(self.sensor_ids)
+                if set(active_sensor_ids) == set(self.sensor_ids)
+                else []
+            )
+        raise AssertionError("unreachable")
 
     def assess_sensor(
         self,
@@ -1415,7 +1523,9 @@ class GriebelReferenceBackend:
                 uncertainty=float(values[1]),
                 eta=float(values[2]),
             )
+
         self.latest_measure[sensor_id] = measure
+        self.latest_timestamp[sensor_id] = timestamp
         self.sensor_times[sensor_id].append(
             (timestamp - start_time).total_seconds()
         )
@@ -1424,30 +1534,44 @@ class GriebelReferenceBackend:
         self.sensor_uncertainty[sensor_id].append(measure.uncertainty)
         return measure
 
-    def finish_event(
+    def _append_constructed_decision_summary(
         self,
         timestamp: datetime,
         start_time: datetime,
-        active_sensor_ids: list[int],
+        selected_ids: list[int],
     ) -> None:
-        if not self.native or not self.should_update_event(active_sensor_ids):
+        if not GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP:
             return
 
-        # The synchronous publication always has all current decisions.  The
-        # explicit async hold-last extension uses the most recent decision for
-        # inactive sensors once all assessors have been initialised.
         decisions = []
-        for sensor_id in self.sensor_ids:
-            accepted = self.latest_measure[sensor_id].accepted
-            if accepted is None:
+        source_ages = []
+        for sensor_id in selected_ids:
+            measure = self.latest_measure[sensor_id]
+            source_timestamp = self.latest_timestamp[sensor_id]
+            accepted = measure.accepted
+            if accepted is None or source_timestamp is None:
+                # Important for hold_last during startup.
                 return
             decisions.append(float(accepted))
+            source_ages.append(
+                max(0.0, (timestamp - source_timestamp).total_seconds())
+            )
 
+        if not decisions:
+            return
+
+        # This deliberately stays at the decision level.  It is a smoothed
+        # visualization of native threshold outcomes, NOT a reconstruction of
+        # Griebel's original source opinions or multi-source ABF.
         true_fraction = float(np.mean(decisions))
-        evidence = np.array([true_fraction, 1.0 - true_fraction], dtype=float)
+        evidence = np.array(
+            [true_fraction, 1.0 - true_fraction],
+            dtype=float,
+        )
         step_opinion = sl.DirichletDistribution2d.from_evidences(
             evidence
         ).as_opinion()
+
         self.overall_window.append(step_opinion)
         if len(self.overall_window) == 1:
             overall = deepcopy(self.overall_window[0])
@@ -1461,6 +1585,29 @@ class GriebelReferenceBackend:
         self.overall_p_ok.append(p_ok(overall))
         self.overall_uncertainty.append(uncertainty(overall))
         self.overall_true_fraction.append(true_fraction)
+        self.overall_source_count.append(len(selected_ids))
+        self.overall_max_source_age_s.append(
+            max(source_ages) if source_ages else 0.0
+        )
+
+    def finish_event(
+        self,
+        timestamp: datetime,
+        start_time: datetime,
+        active_sensor_ids: list[int],
+    ) -> None:
+        if not self.native:
+            return
+
+        selected_ids = self._selected_source_ids(active_sensor_ids)
+        if not selected_ids:
+            return
+
+        self._append_constructed_decision_summary(
+            timestamp,
+            start_time,
+            selected_ids,
+        )
 
 
 # =============================================================================
@@ -2048,6 +2195,8 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             f"n_ST={state.n_st}, gamma={state.discount:.6f}"
         )
     print(f"  Griebel reference: {griebel.status}")
+    print(f"  Griebel async extension: {GRIEBEL_ASYNC_EXTENSION_MODE}")
+    print("  Griebel comparison: native local delta/u/eta + optional constructed decision-level summary")
 
     track = Track()
     event_timestamps: list[datetime] = []
@@ -2816,119 +2965,165 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Figure 5: architecture baseline + optional original Griebel reference.
+    # Figure 5: architecture comparison + decision-level reference context.
     # ------------------------------------------------------------------
+    #
+    # The grey and purple curves compare two architectures implemented in the
+    # present PIT/TEF framework.  Native Griebel outputs are shown separately in
+    # the next figure.  The optional dotted decision PP below is only a
+    # constructed temporal summary of Griebel's native threshold decisions; it
+    # is NOT a reconstructed Griebel multi-source ABF opinion.
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
+
     axes[0].plot(
         event_times,
         [normalized_disbelief(op) for op in result.common_abf_history],
         color="tab:gray",
         linestyle="--",
-        label=r"common-prior PIT/TEF ABF baseline: $d_{\mathrm{norm}}$",
+        alpha=0.85,
+        label=r"common-prior PIT/TEF ABF architecture baseline: $d_{\mathrm{norm}}$",
     )
     axes[0].plot(
         event_times,
         [normalized_disbelief(op) for op in result.batch_history],
         color="tab:purple",
+        linewidth=1.6,
         label=r"proposed direct batch $C_F$: $d_{\mathrm{norm}}$",
     )
+
     axes[1].plot(
         event_times,
         [uncertainty(op) for op in result.common_abf_history],
         color="tab:gray",
         linestyle="--",
-        label="common-prior PIT/TEF ABF baseline: uncertainty",
+        alpha=0.85,
+        label="common-prior PIT/TEF ABF architecture baseline: uncertainty",
     )
     axes[1].plot(
         event_times,
         [uncertainty(op) for op in result.batch_history],
         color="tab:purple",
-        label="proposed direct batch $C_F$: uncertainty",
+        linewidth=1.6,
+        label=r"proposed direct batch $C_F$: uncertainty",
     )
-
-    if result.griebel.native and result.griebel.overall_times_s:
-        if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
-            griebel_label = "Griebel 2023 PP overall reference"
-        elif GRIEBEL_ASYNC_EXTENSION_MODE == "hold_last":
-            griebel_label = "Griebel-style async hold-last PP (not published method)"
-        else:
-            griebel_label = "Griebel PP on simultaneous full batches only"
-        axes[2].plot(
-            result.griebel.overall_times_s,
-            result.griebel.overall_p_ok,
-            color="black",
-            linewidth=1.5,
-            label=griebel_label,
-        )
-    else:
-        axes[2].text(
-            0.5,
-            0.5,
-            "Griebel native backend unavailable / placeholder active",
-            ha="center",
-            va="center",
-            transform=axes[2].transAxes,
-        )
 
     if SHOW_PROJECTED_PROBABILITY:
         axes[2].plot(
             event_times,
             [p_ok(op) for op in result.batch_history],
             color="tab:purple",
-            alpha=0.75,
+            linewidth=1.5,
+            alpha=0.85,
             label="proposed direct batch PP (secondary view)",
         )
+
+    if (
+        result.griebel.native
+        and GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP
+        and result.griebel.overall_times_s
+    ):
+        axes[2].plot(
+            result.griebel.overall_times_s,
+            result.griebel.overall_p_ok,
+            color="black",
+            linestyle=":",
+            linewidth=1.35,
+            label=(
+                "constructed Griebel threshold-decision PP "
+                "(decision-level diagnostic only)"
+            ),
+        )
+
     axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
     axes[1].set_ylabel("uncertainty")
     axes[2].set_ylabel("projected probability")
     axes[2].set_xlabel("time [s]")
+
     for axis in axes:
         axis.grid(True)
         axis.legend(loc="upper right")
         add_disturbance_spans(axis)
+
     axes[0].set_ylim(-0.02, 1.02)
     axes[1].set_ylim(-0.02, 1.02)
     axes[2].set_ylim(-0.02, 1.02)
+
+    if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+        comparison_subtitle = (
+            "synchronous reference; native Griebel local SA is shown separately"
+        )
+    else:
+        comparison_subtitle = (
+            f"asynchronous decision-level extension = {GRIEBEL_ASYNC_EXTENSION_MODE!r}; "
+            "not claimed as the published synchronous multi-source method"
+        )
+
     fig.suptitle(
-        "Reference comparison\n"
-        "Griebel is native in the synchronous case; async hold-last is explicitly only a straightforward extension"
+        "Reference comparison\n" + comparison_subtitle
     )
     fig.tight_layout()
 
-    # Local Griebel threshold outputs are useful for checking reproduction.
+    # ------------------------------------------------------------------
+    # Native Griebel local outputs: these are the actual values returned by
+    # KalmanSelfAssessor and therefore the primary Griebel comparison available
+    # through the current API.
+    # ------------------------------------------------------------------
     if result.griebel.native:
         fig, axes = plt.subplots(
-            len(sensor_ids), 1, figsize=(15, 6), sharex=True, squeeze=False
+            2,
+            len(sensor_ids),
+            figsize=(15, 7),
+            sharex="col",
+            squeeze=False,
         )
-        for row, sensor_id in enumerate(sensor_ids):
-            axis = axes[row, 0]
+
+        for col, sensor_id in enumerate(sensor_ids):
+            colour = result.isolated_states[sensor_id].colour
+
+            axis = axes[0, col]
             axis.plot(
                 result.griebel.sensor_times[sensor_id],
                 result.griebel.sensor_delta[sensor_id],
-                color=result.isolated_states[sensor_id].colour,
-                label=rf"Griebel $\delta^{{({sensor_id})}}$",
+                color=colour,
+                label=rf"native Griebel $\delta^{{({sensor_id})}}$",
             )
             axis.plot(
                 result.griebel.sensor_times[sensor_id],
                 result.griebel.sensor_eta[sensor_id],
                 color="black",
                 linestyle="--",
-                label=rf"Griebel $\eta^{{({sensor_id})}}$",
+                label=rf"native Griebel $\eta^{{({sensor_id})}}$",
             )
+            axis.set_title(f"Sensor {sensor_id}")
+            axis.set_ylabel("DC / threshold")
             axis.grid(True)
             axis.legend(loc="upper right")
-            axis.set_ylabel("DC / threshold")
             add_disturbance_spans(axis)
-        axes[-1, 0].set_xlabel("time [s]")
+
+            axis = axes[1, col]
+            axis.plot(
+                result.griebel.sensor_times[sensor_id],
+                result.griebel.sensor_uncertainty[sensor_id],
+                color=colour,
+                label=rf"native Griebel $u^{{({sensor_id})}}$",
+            )
+            axis.set_ylabel("uncertainty")
+            axis.set_xlabel("time [s]")
+            axis.set_ylim(-0.02, 1.02)
+            axis.grid(True)
+            axis.legend(loc="upper right")
+            add_disturbance_spans(axis)
+
         if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
             griebel_local_title = (
-                "Native Griebel single-sensor SA reproduction: threshold decisions"
+                "Native Griebel single-sensor SA outputs"
             )
         else:
             griebel_local_title = (
-                "Native Griebel single-sensor assessor in the asynchronous "
-                "hold-last extension: threshold decisions"
+                "Native Griebel single-sensor SA outputs under the explicitly "
+                f"labelled {GRIEBEL_ASYNC_EXTENSION_MODE!r} event semantics"
             )
+
         fig.suptitle(griebel_local_title)
         fig.tight_layout()
 
@@ -3691,13 +3886,30 @@ def print_summary(result: ProcessingResult) -> None:
     print(f"  single-sensor active batches: {single}")
     print(f"  scheduled timestamps without active measurement: {zero}")
 
-    print("\nGriebel reference")
+    print("\nGriebel reference/comparison")
     print(f"  backend: {result.griebel.status}")
     print(f"  async extension mode: {GRIEBEL_ASYNC_EXTENSION_MODE}")
-    if result.griebel.native:
+    print("  primary native comparison: per-sensor delta / uncertainty / eta")
+    print(
+        "  native multi-source source opinions are not exposed by the current "
+        "get_sas_measures() interface -> no pseudo-ABF is reconstructed"
+    )
+    if result.griebel.native and GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP:
         print(
-            f"  overall PP samples: {len(result.griebel.overall_p_ok)}"
+            "  constructed threshold-decision PP samples: "
+            f"{len(result.griebel.overall_p_ok)}"
         )
+        if result.griebel.overall_source_count:
+            print(
+                "  constructed decision source-count range: "
+                f"{min(result.griebel.overall_source_count)}.."
+                f"{max(result.griebel.overall_source_count)}"
+            )
+        if result.griebel.overall_max_source_age_s:
+            print(
+                "  max source age in constructed decision summary: "
+                f"{max(result.griebel.overall_max_source_age_s):.3f} s"
+            )
 
     # The key cross-contamination diagnostic is nominal Sensor-2 d_norm
     # during Sensor-1-only disturbance intervals.
