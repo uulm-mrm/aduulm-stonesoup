@@ -170,7 +170,7 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 
 # False: asynchronous/multi-rate case.
 # True: limiting case; both sensors are sampled on the 10 Hz grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 
 # Optional dedicated stress test for cross-source prior contamination.
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
@@ -295,8 +295,8 @@ AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 # Conditional/update-order opinions are only updated at simultaneous sensor
 # timestamps. They therefore need a longer physical horizon to accumulate
 # enough PIT observations.
-CONDITIONAL_SHORT_TERM_HORIZON_S = 5.0
-DISAGREEMENT_SHORT_TERM_HORIZON_S = 5.0
+CONDITIONAL_SHORT_TERM_HORIZON_S = 10.0
+DISAGREEMENT_SHORT_TERM_HORIZON_S = 10.0
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
