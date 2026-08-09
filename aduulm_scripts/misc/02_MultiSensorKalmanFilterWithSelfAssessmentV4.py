@@ -362,11 +362,53 @@ MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR = 4.0
 #   next disturbance starts at 90 s.
 SENSOR_2_DROPOUT_INTERVAL_S = (70.0, 80.0)
 
-# Shape-only measurement-noise disturbance for Sensor 1:
-# mean and covariance remain exactly the nominal model assumptions,
-# E[v] = 0 and Cov[v] = R, but the samples are uniform instead of Gaussian.
-# This separates a violated distributional assumption from a wrong R matrix.
+# Shape-only measurement-noise disturbance for Sensor 1.
+# Both selectable variants preserve the nominal first two moments
+#
+#     E[v] = 0,    Cov[v] = R,
+#
+# while violating the assumed single-Gaussian distribution.
+#
+# False -> symmetric bimodal Gaussian mixture
+# True  -> contaminated/heavy-tailed Gaussian mixture
+USE_HEAVY_TAILED_NON_GAUSSIAN = True
+
 VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S = (90.0, 100.0)
+
+# --- Variant A: symmetric bimodal Gaussian mixture -------------------------
+# Standardized component:
+#   u ~ 0.5*N(-mu_b, sigma_b^2) + 0.5*N(+mu_b, sigma_b^2)
+# with mu_b^2 + sigma_b^2 = 1.
+BIMODAL_MODE_OFFSET_STD = 0.90
+BIMODAL_WITHIN_MODE_STD = float(
+    np.sqrt(1.0 - BIMODAL_MODE_OFFSET_STD ** 2)
+)
+
+# --- Variant B: contaminated/heavy-tailed Gaussian mixture -----------------
+# Standardized component:
+#   u ~ p_core*N(0, sigma_core^2)
+#      + (1-p_core)*N(0, sigma_tail^2)
+#
+# sigma_tail is chosen so that Var[u] = 1 exactly in the population.
+# With the values below:
+#   90% N(0, 0.5^2) + 10% N(0, 2.7839^2).
+HEAVY_TAIL_CORE_PROBABILITY = 0.90
+HEAVY_TAIL_CORE_STD = 0.50
+HEAVY_TAIL_TAIL_STD = float(
+    np.sqrt(
+        (
+            1.0
+            - HEAVY_TAIL_CORE_PROBABILITY * HEAVY_TAIL_CORE_STD ** 2
+        )
+        / (1.0 - HEAVY_TAIL_CORE_PROBABILITY)
+    )
+)
+
+NON_GAUSSIAN_DISTURBANCE_LABEL = (
+    "S1 variance-matched heavy-tailed mixture"
+    if USE_HEAVY_TAILED_NON_GAUSSIAN
+    else "S1 variance-matched bimodal mixture"
+)
 TURN_INTERVAL_S = (110.0, 120.0)
 
 # Final process-noise mismatch now affects BOTH x and y process components.
@@ -381,7 +423,11 @@ DISTURBANCE_INTERVALS = [
         "tab:blue",
     ),
     (*SENSOR_2_DROPOUT_INTERVAL_S, "S2 unavailable", "tab:gray"),
-    (*VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, "S1 variance-matched non-Gaussian noise", "tab:purple"),
+    (
+        *VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S,
+        NON_GAUSSIAN_DISTURBANCE_LABEL,
+        "tab:purple",
+    ),
     (*TURN_INTERVAL_S, "common motion-model mismatch", "tab:green"),
     (*INCREASED_PROCESS_XY_INTERVAL_S, "common increased x/y process noise", "tab:brown"),
 ]
@@ -429,24 +475,102 @@ def robust_cholesky(matrix: np.ndarray) -> np.ndarray:
     )
 
 
-def sample_variance_matched_uniform_noise_from_cov(
+def sample_variance_matched_bimodal_noise_from_cov(
     covariance: np.ndarray,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Sample zero-mean non-Gaussian noise with exactly the target covariance.
+    """Sample variance-matched symmetric bimodal Gaussian-mixture noise.
 
-    Let u_i ~ U(-sqrt(3), sqrt(3)). Then E[u] = 0 and Cov[u] = I.
-    With L L^T = covariance, v = L u therefore satisfies
-    E[v] = 0 and Cov[v] = covariance while remaining non-Gaussian.
+    Each standardized component follows
+
+        0.5*N(-mu_b, sigma_b^2) + 0.5*N(+mu_b, sigma_b^2)
+
+    with mu_b^2 + sigma_b^2 = 1. Therefore every component has zero mean
+    and unit variance while being distinctly non-Gaussian/bimodal.
+
+    Independent mode signs are used per component, so the standardized
+    covariance remains I. With L L^T = covariance and v = L u:
+
+        E[v] = 0,   Cov[v] = covariance.
+
+    Thus only the distributional shape assumption is violated; the filter's
+    nominal mean and R matrix remain correct.
     """
     covariance = np.asarray(covariance, dtype=float)
     chol = robust_cholesky(covariance)
-    unit_variance_uniform = rng.uniform(
-        -np.sqrt(3.0),
-        np.sqrt(3.0),
-        size=(covariance.shape[0], 1),
+
+    dimension = covariance.shape[0]
+    mode_sign = rng.choice(
+        np.array([-1.0, 1.0]),
+        size=(dimension, 1),
     )
-    return chol @ unit_variance_uniform
+    within_mode_noise = rng.normal(
+        loc=0.0,
+        scale=BIMODAL_WITHIN_MODE_STD,
+        size=(dimension, 1),
+    )
+    standardized_noise = (
+        mode_sign * BIMODAL_MODE_OFFSET_STD
+        + within_mode_noise
+    )
+
+    return chol @ standardized_noise
+
+
+def sample_variance_matched_heavy_tailed_noise_from_cov(
+    covariance: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample a variance-matched contaminated Gaussian mixture.
+
+    Each standardized component independently follows
+
+        p_core*N(0, sigma_core^2)
+        + (1-p_core)*N(0, sigma_tail^2),
+
+    with sigma_tail selected so that the population variance is exactly one.
+
+    Hence v = chol(R) @ u has zero mean and covariance R, but its distribution
+    is leptokurtic/heavy-tailed. This is a stationary alternative noise model
+    over the complete disturbance interval, unlike the separate sporadic
+    outlier disturbance.
+    """
+    covariance = np.asarray(covariance, dtype=float)
+    chol = robust_cholesky(covariance)
+
+    dimension = covariance.shape[0]
+    use_core = (
+        rng.random(size=(dimension, 1))
+        < HEAVY_TAIL_CORE_PROBABILITY
+    )
+    component_std = np.where(
+        use_core,
+        HEAVY_TAIL_CORE_STD,
+        HEAVY_TAIL_TAIL_STD,
+    )
+    standardized_noise = rng.normal(
+        loc=0.0,
+        scale=component_std,
+        size=(dimension, 1),
+    )
+    return chol @ standardized_noise
+
+
+def sample_variance_matched_non_gaussian_noise_from_cov(
+    covariance: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Dispatch to the selected variance-matched non-Gaussian variant."""
+    if USE_HEAVY_TAILED_NON_GAUSSIAN:
+        return sample_variance_matched_heavy_tailed_noise_from_cov(
+            covariance,
+            rng,
+        )
+
+    return sample_variance_matched_bimodal_noise_from_cov(
+        covariance,
+        rng,
+    )
 
 
 # =============================================================================
@@ -1580,11 +1704,13 @@ def generate_sensor_schedule(
             <= elapsed_s
             < VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S[1]
         ):
-            # Deliberately violate ONLY the Gaussian shape assumption:
-            # the filter's assumed R remains correct in mean/covariance.
+            # Deliberately violate ONLY the assumed single-Gaussian shape.
+            # Both variants retain zero mean and the nominal covariance R in
+            # the population.
             measurement_vector = true_model.function(state, noise=False)
-            measurement_vector += sample_variance_matched_uniform_noise_from_cov(
-                np.asarray(true_model.noise_covar, dtype=float), rng
+            measurement_vector += sample_variance_matched_non_gaussian_noise_from_cov(
+                np.asarray(true_model.noise_covar, dtype=float),
+                rng,
             )
         else:
             measurement_vector = true_model.function(state, noise=True)
@@ -1766,6 +1892,7 @@ class ProcessingResult:
     disagreement_state: SensorDisagreementState | None
     conditional_influence_times_s: list[float]
     conditional_influence_scores: dict[tuple[int, int], list[float]]
+    conditional_influence_magnitude: list[float]
     conditional_order_asymmetry: list[float]
     batch_track_state: BatchTrackAssessmentState
     griebel: GriebelReferenceBackend
@@ -1875,6 +2002,20 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         f"  conditional/order horizon: {CONDITIONAL_SHORT_TERM_HORIZON_S:g} s"
     )
     print(f"  sensor-pair disagreement horizon: {DISAGREEMENT_SHORT_TERM_HORIZON_S:g} s")
+    if USE_HEAVY_TAILED_NON_GAUSSIAN:
+        print(
+            "  non-Gaussian disturbance: heavy-tailed mixture, "
+            f"{100.0 * HEAVY_TAIL_CORE_PROBABILITY:.0f}% "
+            f"N(0,{HEAVY_TAIL_CORE_STD:.3f}^2) + "
+            f"{100.0 * (1.0 - HEAVY_TAIL_CORE_PROBABILITY):.0f}% "
+            f"N(0,{HEAVY_TAIL_TAIL_STD:.3f}^2)"
+        )
+    else:
+        print(
+            "  non-Gaussian disturbance: symmetric bimodal mixture, "
+            f"mode offset={BIMODAL_MODE_OFFSET_STD:.3f}, "
+            f"within-mode sigma={BIMODAL_WITHIN_MODE_STD:.3f}"
+        )
     print(
         "  TEF fusion types: "
         f"local={LOCAL_CONSISTENCY_TEF_FUSION}, "
@@ -1926,6 +2067,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     order_decomposition_error_21: list[float] = []
     conditional_influence_times_s: list[float] = []
     conditional_influence_scores = {(1, 2): [], (2, 1): []}
+    conditional_influence_magnitude: list[float] = []
     conditional_order_asymmetry: list[float] = []
 
     for timestamp in sorted(scenario.events_by_timestamp):
@@ -2078,6 +2220,16 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 conditional_influence_times_s.append(elapsed_s)
                 conditional_influence_scores[(first_id, second_id)].append(i_2_to_1)
                 conditional_influence_scores[(second_id, first_id)].append(i_1_to_2)
+
+                # Direction-independent magnitude of update-order sensitivity.
+                # M_I = 0 only when both directed influence contrasts vanish.
+                conditional_influence_magnitude.append(
+                    0.5 * (abs(i_1_to_2) + abs(i_2_to_1))
+                )
+
+                # Signed asymmetry between the two directed influences.
+                # This is diagnostic only and must not be interpreted as
+                # identifying the faulty sensor without MC evidence.
                 conditional_order_asymmetry.append(i_1_to_2 - i_2_to_1)
             else:
                 # A simultaneous comparison was scheduled but cannot be formed.
@@ -2231,6 +2383,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         disagreement_state=disagreement_state,
         conditional_influence_times_s=conditional_influence_times_s,
         conditional_influence_scores=conditional_influence_scores,
+        conditional_influence_magnitude=conditional_influence_magnitude,
         conditional_order_asymmetry=conditional_order_asymmetry,
         batch_track_state=batch_track_state,
         griebel=griebel,
@@ -2592,10 +2745,31 @@ def plot_static_results(result: ProcessingResult) -> None:
         axes[2].set_ylabel("uncertainty")
         axes[2].set_xlabel("time [s]")
         axes[1].axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+        if result.conditional_influence_magnitude:
+            axes[1].plot(
+                result.conditional_influence_times_s,
+                result.conditional_influence_magnitude,
+                color="tab:green",
+                linestyle="-.",
+                linewidth=1.4,
+                label=(
+                    r"$M_I=\frac{1}{2}"
+                    r"(|I_{1\rightarrow2}|+|I_{2\rightarrow1}|)$"
+                ),
+            )
+
         if result.conditional_order_asymmetry:
-            axes[1].plot(result.conditional_influence_times_s, result.conditional_order_asymmetry,
-                         color="black", linestyle=":", linewidth=1.2,
-                         label=r"$A_I=I_{1\rightarrow2}-I_{2\rightarrow1}$ (diagnostic only)")
+            axes[1].plot(
+                result.conditional_influence_times_s,
+                result.conditional_order_asymmetry,
+                color="black",
+                linestyle=":",
+                linewidth=1.2,
+                label=(
+                    r"$A_I=I_{1\rightarrow2}-I_{2\rightarrow1}$ "
+                    r"(diagnostic only)"
+                ),
+            )
 
         for axis in axes:
             axis.grid(True)
@@ -2607,7 +2781,8 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig.suptitle(
             "Matched conditional influence diagnostics\n"
             rf"same simultaneous events, same $T_{{ST}}={CONDITIONAL_SHORT_TERM_HORIZON_S:g}$ s "
-            r"TEF; $I_{j\rightarrow s}$ quantifies update-order influence, not fault attribution"
+            r"TEF; $I_{j\rightarrow s}$ is directional, "
+            r"$M_I$ quantifies total order sensitivity"
         )
         fig.tight_layout()
 
@@ -3549,7 +3724,7 @@ def print_summary(result: ProcessingResult) -> None:
         (OUTLIER_INTERVAL_S, "S1 outliers"),
         (SENSOR_1_BIAS_INTERVAL_S, f"S1 +{SENSOR_1_BIAS_VECTOR_M[0]:g} m x-bias"),
         (INCREASED_MEAS_XY_INTERVAL_S, f"S1 increased x/y-noise (R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})"),
-        (VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, "S1 variance-matched non-Gaussian noise"),
+        (VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, NON_GAUSSIAN_DISTURBANCE_LABEL),
     ):
         iso = interval_mean(s2_iso.event_times_s, s2_iso_d_norm, interval)
         common = interval_mean(
@@ -3606,6 +3781,8 @@ def print_summary(result: ProcessingResult) -> None:
     print("  C_{s|empty}^{sim}: matched simultaneous common-prior reference")
     print("  C_{s|j}       : same simultaneous channel after virtual update with sensor j")
     print("  I_{j->s}      : conditional update-order influence; not fault attribution")
+    print("  M_I           : mean absolute bidirectional conditional influence")
+    print("  A_I           : signed order asymmetry; diagnostic only")
     print("  D_12          : direct pair agreement; d_norm quantifies disagreement")
     print("  C_F           : direct consistency of the actually used central measurement batch")
     print("  H_s=A_s AND C_s: optional operational sensor-path diagnostic")
