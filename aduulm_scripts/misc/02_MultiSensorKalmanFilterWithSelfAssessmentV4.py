@@ -393,7 +393,7 @@ BIMODAL_WITHIN_MODE_STD = float(
 # With the values below:
 #   90% N(0, 0.5^2) + 10% N(0, 2.7839^2).
 HEAVY_TAIL_CORE_PROBABILITY = 0.90
-HEAVY_TAIL_CORE_STD = 0.50
+HEAVY_TAIL_CORE_STD = 0.20
 HEAVY_TAIL_TAIL_STD = float(
     np.sqrt(
         (
