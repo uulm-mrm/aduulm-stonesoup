@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-02 V6 - Event-based multi-sensor Kalman filter with PIT/TEF self-assessment.
+02 V7 - Event-based multi-sensor Kalman filter with PIT/TEF self-assessment.
 
 Purpose
 -------
@@ -26,12 +26,10 @@ separating the assessment into semantically distinct opinions:
    - if an expected measurement is missing, consistency TEFs are FROZEN:
      missingness is represented only by A_s.
 
-4. Availability-trust-discounted isolated consistency
+4. Availability-trust-discounted isolated consistency (diagnostic only)
        C~_s = A_s (*) C_s^iso
-   - availability changes the downstream reliability of the local consistency
-     statement without modifying C_s^iso itself,
-   - a dropout therefore increases downstream uncertainty instead of creating
-     artificial inconsistency evidence.
+   - retained to inspect each local path under its own availability,
+   - it is deliberately NOT fused into the base track-consistency opinion.
 
 5. Direct sensor-to-sensor agreement G_12
    - Delta z = z_1-z_2 removes the common state when both sensors measure the
@@ -41,47 +39,34 @@ separating the assessment into semantically distinct opinions:
    - radial and signed component channels use PIT -> TEF -> SL,
    - belief means pair agreement; normalized disbelief is pair disagreement.
 
-6. Common physical horizon for statistical track-trust inputs
-   - C_1^iso, C_2^iso, G_12 and C_F all use the same physical short-term
-     horizon T_SA = 5 s (rate-normalised to the event stream feeding each TEF),
-   - availability deliberately remains faster because it represents a different
-     proposition: whether expected sensor information is present.
-   - the existing fusion-facing mirror states are retained only for code/plot
-     compatibility; they now have the same 5 s temporal semantics as the
-     corresponding diagnostic states.
+6. Base and strict track-consistency branches
+       omega_B      = WBF(C_1^iso, C_2^iso, C_F)
+       omega_strict = AND(C_1^iso, C_2^iso, C_F)
+   - omega_B is the non-pessimistic nominal branch,
+   - omega_strict is only the conditional branch used when the sensors disagree.
 
-7. Baseline track-consistency opinion B
-       C~_s = A_s (*) C_s^iso
-       omega_B = WBF(C~_1, C~_2, omega_C_F)
-   - availability acts only as reliability trust for the local sensor-specific
-     consistency statements,
-   - WBF combines the mutually dependent consistency views without treating the
-     direct disagreement channel as just another interchangeable source.
+7. Direct central-filter batch consistency C_F
+   - batch NIS of the actually active measurement set against the central prior,
+   - the chi-square degrees of freedom change with the active set,
+   - PIT maps every valid null distribution to the same U(0,1) evidence domain,
+   - one TEF therefore handles asynchronous single-sensor and simultaneous
+     multi-sensor events.
 
-8. Direct sensor-pair agreement as a conditional constraint
-       omega_A12 = CBF(A_1, A_2)
-       G~_12 = omega_A12 (*) G_12
-   - G_12 is the proposition that the two sensors agree; strong disbelief means
-     direct pair disagreement,
-   - G~_12 is used as the antecedent of a Subjective-Logic deduction rather than
-     being averaged/fused into omega_B.
-
-9. Track trustworthiness T
-       omega_T = Deduction(
-           G~_12,
-           omega_{T|G_12}     = omega_B,
-           omega_{T|not G_12} = FALSE
-       )
-   - nominal pair agreement leaves the baseline track assessment largely intact,
-   - strong pair disagreement directly supports the proposition that the current
-     track is not trustworthy,
+8. Pair-conditioned consistency and final track trustworthiness T
+       omega_C = Deduction(G_12; omega_B, omega_strict)
+       omega_A = CBF(A_1, A_2)
+       omega_T = trust_discount(omega_A, omega_C)
+   - pair agreement selects continuously between a permissive WBF branch and a
+     stricter conjunction branch; there is no dogmatic FALSE conditional,
+   - combined availability is applied only after the statistical consistency
+     reasoning, so a dropout primarily raises uncertainty rather than disbelief,
    - omega_T answers the output-level question:
        "Is the currently output track trustworthy?"
    - the complete track output is interpreted as (x_hat, P, omega_T), where P is
      the filter's primary state uncertainty and omega_T is secondary online
      trustworthiness / self-assessment.
 
-10. Optional Griebel 2023 reference and comparison layer
+9. Optional Griebel 2023 reference and comparison layer
    - native single-sensor SA is evaluated against the common central prediction,
    - the currently available API exposes DC, uncertainty and threshold, not the
      complete internal source opinions of the published multi-source fusion,
@@ -94,15 +79,13 @@ Temporal parametrisation
 TEF horizons are specified in physical time and converted to sample counts
 using the corresponding assessment-event rate:
 
-    all statistical consistency channels T_SA = 5.0 s
-      - local/common sensor consistency
-      - direct central-batch consistency C_F
-      - direct sensor-pair agreement G_12
-    availability horizon T_A                  = 1.0 s
+    local/common sensor consistency horizon = 5.0 s
+    direct central-batch horizon            = 5.0 s
+    availability horizon                    = 5.0 s
+    sensor-pair disagreement horizon        = 5.0 s
 
 Thus n_ST ~= T * f for the event stream feeding the respective TEF. The
-long-term discount is rate-normalised as well. Statistical opinions that enter
-the same output-level reasoning therefore refer to the same physical history.
+long-term discount is rate-normalised as well.
 
 Scope assumptions
 -----------------
@@ -115,8 +98,6 @@ Scope assumptions
 
 
 from __future__ import annotations
-
-SCRIPT_BUILD = "V6_VERIFIED_DEDUCTION_2026-08-09"
 
 import json
 from collections import defaultdict, deque
@@ -180,13 +161,13 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 
 # False: asynchronous/multi-rate case.
 # True: limiting case; both sensors are sampled on the 10 Hz grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 
 # Optional dedicated stress test for cross-source prior contamination.
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
 # Sensor 1 is intentionally much faster than nominal Sensor 2, so several
 # faulty S1 updates can affect the central prior before the next S2 update.
-CROSS_CONTAMINATION_RATE_STRESS_TEST = False
+CROSS_CONTAMINATION_RATE_STRESS_TEST = True
 
 NOMINAL_SENSOR_1_RATE_HZ = 10.0
 NOMINAL_SENSOR_2_RATE_HZ = 12.5
@@ -290,12 +271,28 @@ GRIEBEL_ASYNC_EXTENSION_MODE = "active_only"
 # but never label it as native Griebel multi-source ABF.
 GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP = True
 
-# Output-level construction:
-# - local isolated consistency is first reliability-discounted by availability,
-# - those local views and the direct central-batch consistency form a baseline
-#   track-consistency opinion by WBF,
-# - direct pair agreement is kept out of that fusion and instead constrains the
-#   final track-trust proposition through Subjective-Logic deduction.
+# Output-level construction is hierarchical and separates inconsistency
+# evidence from missing-information uncertainty:
+#
+#   omega_B      = WBF(C_1^iso, C_2^iso, C_F)
+#   omega_strict = AND(C_1^iso, C_2^iso, C_F)
+#   omega_C      = Deduction(
+#                      G_12;
+#                      omega_{C|G_12}     = omega_B,
+#                      omega_{C|not G_12} = omega_strict
+#                  )
+#   omega_A      = CBF(A_1, A_2)
+#   omega_T      = trust_discount(omega_A, omega_C)
+#
+# Rationale:
+# - Under normal pair agreement, WBF avoids the pessimism of always applying
+#   conjunction to several merely supportive consistency opinions.
+# - Under pair disagreement, deduction switches towards a stricter requirement:
+#   all local/central consistency propositions must support the track.
+# - Availability is applied only afterwards as reliability trust, so dropout
+#   moves committed mass to uncertainty rather than manufacturing disbelief.
+# - All temporal assessment families use the same physical T_ST=5 s; rate
+#   differences are handled by time-normalised sample counts/discounts.
 
 SCENARIO_DURATION_S = 160.0
 TRUTH_RATE_HZ = 100.0  # exactly represents 5, 10, 12.5, 20 and 25 Hz
@@ -311,26 +308,23 @@ NUM_PIT_BINS = 7
 # -----------------------------------------------------------------------------
 # Time-normalised TEF settings
 # -----------------------------------------------------------------------------
-# All statistical consistency opinions that contribute to the output-level
-# track assessment use the same PHYSICAL short-term horizon.  Their sample
-# counts still differ with event rate, i.e. n_ST ~= T_SA * f.
-STATISTICAL_SHORT_TERM_HORIZON_S = 5.0
-CONSISTENCY_SHORT_TERM_HORIZON_S = STATISTICAL_SHORT_TERM_HORIZON_S
-BATCH_SHORT_TERM_HORIZON_S = STATISTICAL_SHORT_TERM_HORIZON_S
-DISAGREEMENT_SHORT_TERM_HORIZON_S = STATISTICAL_SHORT_TERM_HORIZON_S
+# Local sensor-consistency channels assess the PIT distribution over a
+# short physical history.  The number of TEF samples is derived from the
+# actual sensor rate.
+CONSISTENCY_SHORT_TERM_HORIZON_S = 5.0
 
-# Availability assesses a different and faster process: whether an expected
-# measurement is present, not whether its statistical residual is consistent.
-AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
+# The same physical short-term horizon is used across consistency families.
+# Different event rates are handled by rate-normalised n_ST values.
+BATCH_SHORT_TERM_HORIZON_S = 5.0
 
-# Kept for the existing mirror states/plots.  It intentionally equals the
-# statistical horizon now; there is no longer a distinct fusion time scale.
-TRACK_FUSION_SHORT_TERM_HORIZON_S = STATISTICAL_SHORT_TERM_HORIZON_S
+# Availability is a distinct proposition but uses the same physical horizon so
+# that output-level opinions refer to comparable recent time spans.
+AVAILABILITY_SHORT_TERM_HORIZON_S = 5.0
 
-# Availability support for the pair channel. "CBF" follows the requested
-# experimental independent-evidence interpretation. "AND" is the stricter
-# proposition-level interpretation of "both sensors are available".
-PAIR_AVAILABILITY_COMBINATION = "CBF"  # "CBF" | "AND"
+# Pair agreement/disagreement is updated only at simultaneous sensor
+# timestamps. The same physical horizon is used for comparability; its sample
+# count is derived from the actual simultaneous-event rate.
+DISAGREEMENT_SHORT_TERM_HORIZON_S = 5.0
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
@@ -375,12 +369,6 @@ RANDOM_SEED_SENSOR_2 = 2
 # =============================================================================
 
 OUTLIER_INTERVAL_S = (10.0, 20.0)
-
-# Outlier occurrence is specified in PHYSICAL TIME rather than in samples.
-# The disturbance helper expects a sample period, so the value is converted for
-# each sensor rate. At 10 Hz, 0.5 s means every 5th measurement.
-OUTLIER_PERIOD_S = 0.5
-OUTLIER_STRENGTH = 8
 
 # Replaces the previous "increased x measurement noise" disturbance.
 # The bias is applied only to Sensor 1 and only to the x measurement component.
@@ -840,7 +828,7 @@ def fuse_weighted(opinions: Iterable):
 
 
 def fuse_cumulative(opinions: Iterable):
-    """Cumulative belief fusion (CBF) for independent evidence streams."""
+    """Cumulative belief fusion for independent evidence sources."""
     opinions = list(opinions)
     if not opinions:
         return vacuous_binomial()
@@ -849,32 +837,49 @@ def fuse_cumulative(opinions: Iterable):
     return sl.Fusion.fuse_opinions(sl.FusionType.CUMULATIVE, opinions)
 
 
-def pair_availability_support(availability_opinions: Iterable):
-    """Reliability used only to discount the pair-agreement path.
+def logical_and(opinions: Iterable):
+    """Conjoin distinct binomial propositions using SL multiplication.
 
-    The default CBF construction follows the requested experimental assumption
-    that the two sensor-availability evidence streams are independent. It is
-    deliberately called availability *support*, not a strict logical
-    intersection. For the proposition "both sensors are available", select
-    PAIR_AVAILABILITY_COMBINATION="AND".
+    This is intentionally different from WBF: the inputs are logical
+    requirements for a higher-level proposition rather than multiple sources
+    assessing the same proposition.
     """
-    opinions = list(availability_opinions)
+    opinions = list(opinions)
     if not opinions:
         return vacuous_binomial()
-    if len(opinions) == 1:
-        return deepcopy(opinions[0])
+    result = deepcopy(opinions[0])
+    for opinion in opinions[1:]:
+        result = result.multiply(opinion)
+    return result
 
-    mode = PAIR_AVAILABILITY_COMBINATION.upper()
-    if mode == "CBF":
-        return fuse_cumulative(opinions)
-    if mode == "AND":
-        result = deepcopy(opinions[0])
-        for opinion in opinions[1:]:
-            result = result.multiply(opinion)
-        return result
-    raise ValueError(
-        "PAIR_AVAILABILITY_COMBINATION must be 'CBF' or 'AND'."
-    )
+
+def dogmatic_false_binomial(prior_ok_value: float = 0.5):
+    """Return a dogmatic opinion that the proposition is false."""
+    result = sl.Opinion2d(0.0, 1.0)
+    result.prior_belief_masses = [prior_ok_value, 1.0 - prior_ok_value]
+    return result
+
+
+def subjective_logic_deduction(
+    antecedent_opinion,
+    consequent_if_true,
+    consequent_if_false,
+):
+    """Use the external Subjective-Logic deduction operator.
+
+    The Python binding exposes the bound method as
+    antecedent.deduction(consequent_if_true, consequent_if_false).
+    """
+    try:
+        return antecedent_opinion.deduction(
+            consequent_if_true,
+            consequent_if_false,
+        )
+    except TypeError as exc:
+        raise RuntimeError(
+            "subjective_logic deduction API mismatch. Expected "
+            "Opinion2d.deduction(opinion_if_true, opinion_if_false)."
+        ) from exc
 
 
 def trust_discount(trust_opinion, observation_opinion):
@@ -896,155 +901,6 @@ def trust_discount(trust_opinion, observation_opinion):
     a = prior_ok(observation_opinion)
     result.prior_belief_masses = [a, 1.0 - a]
     return result
-
-
-_DEDUCTION_ADAPTER = None
-
-
-def dogmatic_binomial(value: bool, prior_ok_value: float = 0.5):
-    """Return the dogmatic binomial TRUE/FALSE opinion from the SL library."""
-    result = sl.Opinion2d(1.0 if value else 0.0, 0.0 if value else 1.0)
-    result.prior_belief_masses = [prior_ok_value, 1.0 - prior_ok_value]
-    return result
-
-
-def _as_binomial_opinion(value):
-    """Accept an SL opinion directly or a distribution exposing as_opinion()."""
-    if value is None:
-        return None
-    if all(hasattr(value, name) for name in ("belief", "disbelief", "uncertainty")):
-        return value
-    if hasattr(value, "as_opinion"):
-        candidate = value.as_opinion()
-        if all(hasattr(candidate, name) for name in ("belief", "disbelief", "uncertainty")):
-            return candidate
-    return None
-
-
-def subjective_logic_deduction(parent_opinion, conditional_true, conditional_false):
-    """Invoke the deduction operator provided by the external SL package.
-
-    No local reimplementation of Subjective-Logic deduction is used here.  The
-    institute/project SL package has existed in slightly different API layouts;
-    therefore this small adapter resolves the native operator once at runtime.
-
-    Semantics for this script:
-        parent_opinion     = omega_G12, proposition "the sensors agree"
-        conditional_true  = omega_{T|G12}
-        conditional_false = omega_{T|not G12}
-
-    The conditional ordering is therefore [TRUE, FALSE].
-    """
-    global _DEDUCTION_ADAPTER
-
-    if _DEDUCTION_ADAPTER is not None:
-        return _DEDUCTION_ADAPTER(
-            parent_opinion,
-            conditional_true,
-            conditional_false,
-        )
-
-    conditionals = [conditional_true, conditional_false]
-    candidates = []
-
-    def add_candidate(label, function):
-        if callable(function):
-            candidates.append((label, function))
-
-    # Module-level variants.
-    for name in ("deduce", "deduction", "deduce_opinion", "deduce_opinions"):
-        add_candidate(f"sl.{name}", getattr(sl, name, None))
-
-    # Class/namespace variants, mirroring the sl.Fusion style used elsewhere.
-    deduction_namespace = getattr(sl, "Deduction", None)
-    if deduction_namespace is not None:
-        for name in ("deduce", "deduction", "deduce_opinion", "deduce_opinions", "apply"):
-            add_candidate(
-                f"sl.Deduction.{name}",
-                getattr(deduction_namespace, name, None),
-            )
-
-    # Some versions may expose a lower-case namespace/module.
-    lower_namespace = getattr(sl, "deduction", None)
-    if lower_namespace is not None and not callable(lower_namespace):
-        for name in ("deduce", "deduction", "deduce_opinion", "deduce_opinions", "apply"):
-            add_candidate(
-                f"sl.deduction.{name}",
-                getattr(lower_namespace, name, None),
-            )
-
-    # Opinion-bound variants.
-    for name in ("deduce", "deduction"):
-        add_candidate(
-            f"Opinion2d.{name}",
-            getattr(parent_opinion, name, None),
-        )
-
-    errors = []
-
-    def make_adapter(function, pattern_index):
-        def adapter(parent, cond_true, cond_false):
-            conds = [cond_true, cond_false]
-            patterns = [
-                ((parent, conds), {}),
-                ((conds, parent), {}),
-                ((parent, cond_true, cond_false), {}),
-                ((cond_true, cond_false, parent), {}),
-                ((), {"opinion": parent, "conditional_opinions": conds}),
-                ((), {"opinion_x": parent, "conditional_opinions": conds}),
-                ((), {"parent_opinion": parent, "conditional_opinions": conds}),
-            ]
-            args, kwargs = patterns[pattern_index]
-            # Bound methods already contain the parent opinion.
-            if getattr(function, "__self__", None) is parent:
-                bound_patterns = [
-                    ((conds,), {}),
-                    ((cond_true, cond_false), {}),
-                    ((), {"conditional_opinions": conds}),
-                ]
-                if pattern_index >= len(bound_patterns):
-                    raise TypeError("pattern not available for bound deduction method")
-                args, kwargs = bound_patterns[pattern_index]
-            result = function(*args, **kwargs)
-            opinion = _as_binomial_opinion(result)
-            if opinion is None:
-                raise TypeError(
-                    "native deduction call did not return a binomial opinion"
-                )
-            return opinion
-        return adapter
-
-    for label, function in candidates:
-        is_bound = getattr(function, "__self__", None) is parent_opinion
-        number_of_patterns = 3 if is_bound else 7
-        for pattern_index in range(number_of_patterns):
-            adapter = make_adapter(function, pattern_index)
-            try:
-                result = adapter(
-                    parent_opinion,
-                    conditional_true,
-                    conditional_false,
-                )
-            except Exception as exc:  # API probing only; resolved once.
-                errors.append(f"{label}[{pattern_index}]: {type(exc).__name__}: {exc}")
-                continue
-            _DEDUCTION_ADAPTER = adapter
-            print(
-                "Resolved native Subjective-Logic deduction operator: "
-                f"{label}, call pattern {pattern_index}"
-            )
-            return result
-
-    visible_deduction_names = sorted(
-        name for name in dir(sl) if "deduc" in name.lower()
-    )
-    diagnostic = "\n    ".join(errors[-8:]) if errors else "<no callable candidates>"
-    raise RuntimeError(
-        "The installed subjective_logic package exposes no deduction operator "
-        "through the supported API layouts. No local SL deduction fallback is "
-        "used deliberately. Available module names containing 'deduc': "
-        f"{visible_deduction_names}. Last probe errors:\n    {diagnostic}"
-    )
 
 
 # =============================================================================
@@ -1388,10 +1244,7 @@ class IsolatedAssessmentFilter:
             measurement_prediction,
         )
         self.prior = updater.update(hypothesis)
-        # Return the exact causal sensor-only measurement prediction so a
-        # fusion-facing TEF can consume the identical innovation/PIT observation
-        # without running a second shadow KF.
-        return opinion, measurement_prediction
+        return opinion
 
 
 @dataclass
@@ -1971,10 +1824,8 @@ def generate_sensor_schedule(
             [[
                 sensor_step(OUTLIER_INTERVAL_S[0]),
                 sensor_step(OUTLIER_INTERVAL_S[1]),
-                max(1, int(round(
-                    OUTLIER_PERIOD_S * definition.actual_rate_hz
-                ))),
-                OUTLIER_STRENGTH,
+                5,
+                8,
             ]],
         ],
     }
@@ -2205,31 +2056,29 @@ class ProcessingResult:
     availability_states: dict[int, AvailabilityAssessmentState]
     disagreement_state: SensorDisagreementState | None
     batch_track_state: BatchTrackAssessmentState
-
-    # Parallel statistical states used ONLY by the output-level fusion cascade.
-    # They receive the same PIT observations as their diagnostic counterparts,
-    # and all use the same 5 s statistical horizon as their diagnostic twins.
-    track_fusion_isolated_states: dict[int, SensorConsistencyState]
-    track_fusion_disagreement_state: SensorDisagreementState | None
-    track_fusion_batch_state: BatchTrackAssessmentState
-
     griebel: GriebelReferenceBackend
 
-    # C~_s = A_s (*) C_s^iso
+    # C~_s = A_s (*) C_s^iso, retained as a local diagnostic only.
     trusted_sensor_history: dict[int, list]
 
-    # omega_L = WBF(C~_1, C~_2), retained as local-only diagnostic
-    local_support_history: list
+    # Base current-track consistency under the normal agreement regime:
+    # omega_B = WBF(C_1^iso, C_2^iso, C_F)
+    track_base_history: list
 
-    # omega_A12 = CBF(A_1,A_2) and G~_12 = omega_A12 (*) G_12
-    pair_availability_history: list
-    trusted_pair_history: list
+    # Stricter conditional branch used only when pair agreement is doubtful:
+    # omega_strict = AND(C_1^iso, C_2^iso, C_F)
+    track_strict_history: list
 
-    # Backward-compatible field name; semantically this stores
-    # omega_B = WBF(C~_1, C~_2, omega_C_F), the baseline track consistency.
-    sensor_support_history: list
+    # Pair-conditioned current-track consistency:
+    # omega_C = Deduction(G_12; omega_B, omega_strict)
+    track_consistency_history: list
 
-    # omega_T = Deduction(G~_12, T|G_12=omega_B, T|not G_12=FALSE)
+    # Availability support from independent expected-output evidence:
+    # omega_A = CBF(A_1, A_2)
+    combined_availability_history: list
+
+    # Final current-track trust:
+    # omega_T = trust_discount(omega_A, omega_C)
     track_output_trust_history: list
 
     # Architecture/reference histories retained for comparison.
@@ -2249,11 +2098,6 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     availability_states: dict[int, AvailabilityAssessmentState] = {}
     isolated_filters: dict[int, IsolatedAssessmentFilter] = {}
 
-    # Mirror states retained for current code/plot compatibility. They consume
-    # identical PIT observations and now use the same 5 s physical statistical
-    # horizon as their diagnostic counterparts.
-    track_fusion_isolated_states: dict[int, SensorConsistencyState] = {}
-
     for sensor_id, definition in scenario.sensor_definitions.items():
         isolated_states[sensor_id] = SensorConsistencyState(
             sensor_id=sensor_id,
@@ -2269,15 +2113,6 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             input_rate_hz=definition.actual_rate_hz,
             colour=definition.colour,
             context_label="common central prediction",
-            fusion_type=LOCAL_CONSISTENCY_TEF_FUSION,
-        )
-        track_fusion_isolated_states[sensor_id] = SensorConsistencyState(
-            sensor_id=sensor_id,
-            label=definition.label,
-            input_rate_hz=definition.actual_rate_hz,
-            colour=definition.colour,
-            context_label="track-fusion isolated sensor-only KF",
-            physical_horizon_s=TRACK_FUSION_SHORT_TERM_HORIZON_S,
             fusion_type=LOCAL_CONSISTENCY_TEF_FUSION,
         )
         availability_states[sensor_id] = AvailabilityAssessmentState(
@@ -2296,46 +2131,24 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     batch_track_state = BatchTrackAssessmentState(
         input_rate_hz=scenario.nominal_batch_event_rate_hz
     )
-    track_fusion_batch_state = BatchTrackAssessmentState(
-        input_rate_hz=scenario.nominal_batch_event_rate_hz,
-        physical_horizon_s=TRACK_FUSION_SHORT_TERM_HORIZON_S,
-        fusion_type=BATCH_TEF_FUSION,
-    )
 
     # Pairwise agreement/disagreement is evaluated only when both sensors
     # provide measurements at the same timestamp.
-    disagreement_state = (
-        SensorDisagreementState(
-            (sensor_ids[0], sensor_ids[1]),
-            scenario.nominal_simultaneous_event_rate_hz,
-        )
-        if len(sensor_ids) == 2
-        else None
-    )
-    track_fusion_disagreement_state = (
-        SensorDisagreementState(
-            (sensor_ids[0], sensor_ids[1]),
-            scenario.nominal_simultaneous_event_rate_hz,
-            physical_horizon_s=TRACK_FUSION_SHORT_TERM_HORIZON_S,
-            fusion_type=DISAGREEMENT_TEF_FUSION,
-        )
-        if len(sensor_ids) == 2
-        else None
-    )
+    disagreement_state = SensorDisagreementState((sensor_ids[0], sensor_ids[1]), scenario.nominal_simultaneous_event_rate_hz) if len(sensor_ids)==2 else None
 
     griebel = GriebelReferenceBackend(sensor_ids, dim_meas=2)
 
     print("\nTime-normalised TEF settings")
     print(
-        f"  common statistical horizon T_SA: "
-        f"{STATISTICAL_SHORT_TERM_HORIZON_S:g} s"
+        f"  consistency horizon: {CONSISTENCY_SHORT_TERM_HORIZON_S:g} s"
     )
     print(
-        f"  availability horizon T_A: {AVAILABILITY_SHORT_TERM_HORIZON_S:g} s"
+        f"  batch horizon: {BATCH_SHORT_TERM_HORIZON_S:g} s"
     )
     print(
-        f"  pair availability combination: {PAIR_AVAILABILITY_COMBINATION}"
+        f"  availability horizon: {AVAILABILITY_SHORT_TERM_HORIZON_S:g} s"
     )
+    print(f"  sensor-pair disagreement horizon: {DISAGREEMENT_SHORT_TERM_HORIZON_S:g} s")
     if USE_HEAVY_TAILED_NON_GAUSSIAN:
         print(
             "  non-Gaussian disturbance: heavy-tailed mixture, "
@@ -2382,10 +2195,10 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     active_batch_sizes: list[int] = []
 
     trusted_sensor_history = {sensor_id: [] for sensor_id in sensor_ids}
-    local_support_history: list = []
-    pair_availability_history: list = []
-    trusted_pair_history: list = []
-    sensor_support_history: list = []
+    track_base_history: list = []
+    track_strict_history: list = []
+    track_consistency_history: list = []
+    combined_availability_history: list = []
     track_output_trust_history: list = []
     common_abf_history: list = []
     batch_history: list = []
@@ -2437,12 +2250,6 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                     timestamp,
                     scenario.start_time,
                 )
-                track_fusion_isolated_states[
-                    event.sensor_id
-                ].advance_without_measurement(
-                    timestamp,
-                    scenario.start_time,
-                )
 
         # ------------------------------------------------------------------
         # C_s^common and C_s^iso, plus optional Griebel single-sensor SA.
@@ -2467,16 +2274,8 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 scenario.start_time,
             )
 
-            _, isolated_measurement_prediction = isolated_filters[
-                event.sensor_id
-            ].process_measurement(
+            isolated_filters[event.sensor_id].process_measurement(
                 measurement,
-                scenario.start_time,
-            )
-            track_fusion_isolated_states[event.sensor_id].update(
-                measurement,
-                isolated_measurement_prediction,
-                timestamp,
                 scenario.start_time,
             )
 
@@ -2517,23 +2316,11 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                     timestamp,
                     scenario.start_time,
                 )
-                if track_fusion_disagreement_state is not None:
-                    track_fusion_disagreement_state.update(
-                        active_by_id[first_id],
-                        active_by_id[second_id],
-                        timestamp,
-                        scenario.start_time,
-                    )
             else:
                 disagreement_state.advance_without_pair(
                     timestamp,
                     scenario.start_time,
                 )
-                if track_fusion_disagreement_state is not None:
-                    track_fusion_disagreement_state.advance_without_pair(
-                        timestamp,
-                        scenario.start_time,
-                    )
 
         # ------------------------------------------------------------------
         # Direct central batch C_F: variable df -> PIT -> common U(0,1) domain.
@@ -2550,23 +2337,11 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
                 timestamp,
                 scenario.start_time,
             )
-            track_fusion_batch_state.update(
-                batch_nis,
-                batch_df,
-                active_sensor_ids,
-                timestamp,
-                scenario.start_time,
-            )
 
         else:
             # A scheduled union event exists but no measurement is available.
-            # Freeze both diagnostic and fusion-facing C_F; availability support
-            # carries the loss of information.
+            # Freeze C_F; availability support carries the loss of information.
             batch_track_state.advance_without_measurement(
-                timestamp,
-                scenario.start_time,
-            )
-            track_fusion_batch_state.advance_without_measurement(
                 timestamp,
                 scenario.start_time,
             )
@@ -2574,94 +2349,98 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         # ------------------------------------------------------------------
         # Hierarchical Subjective-Logic track-trust construction.
         #
-        # All statistical inputs below use the same physical horizon T_SA.
-        # Availability keeps its independent, faster horizon T_A.
+        # Statistical consistency and information availability are deliberately
+        # kept separate until the final trust-discount step.
         #
-        # 1) Availability-discounted local sensor consistency:
+        # 1) Keep availability-discounted local opinions only as diagnostics:
         #       C~_s = A_s (*) C_s^iso
         #
-        # 2) Baseline track consistency (single multi-source WBF call):
-        #       omega_B = WBF(C~_1, C~_2, C_F)
-        #    G_12 is deliberately NOT fused here: it has a different semantic
-        #    role and acts as a conditional constraint on track trust.
+        # 2) Nominal/base track-consistency opinion:
+        #       omega_B = WBF(C_1^iso, C_2^iso, C_F)
         #
-        # 3) Pair agreement reliability:
-        #       omega_A12 = CBF(A_1, A_2)
-        #       G~_12 = omega_A12 (*) G_12
+        # 3) Stricter branch for the case that the sensors disagree:
+        #       omega_strict = AND(C_1^iso, C_2^iso, C_F)
         #
-        # 4) Output-level track trust by native SL deduction:
-        #       omega_T = Deduction(
-        #           G~_12,
-        #           omega_{T|G_12}     = omega_B,
-        #           omega_{T|not G_12} = FALSE
+        # 4) G_12 is a contextual antecedent, not another source to be blindly
+        #    averaged into the same proposition:
+        #
+        #       omega_C = Deduction(
+        #           G_12;
+        #           omega_{C|G_12}     = omega_B,
+        #           omega_{C|not G_12} = omega_strict
         #       )
         #
-        # Thus nominal agreement should preserve omega_B as far as allowed by
-        # the deduction operator, while strong direct disagreement maps toward
-        # the explicit "track not trustworthy" conditional opinion.
+        #    Hence strong pair disagreement only becomes strongly detrimental
+        #    when the local/central consistency opinions also fail to support
+        #    the track.  Unlike the previous FALSE branch, ordinary nominal
+        #    fluctuations of G_12 do not automatically imply a bad track.
+        #
+        # 5) Combine availability evidence using CBF and apply it as reliability
+        #    trust to the already constructed consistency opinion:
+        #
+        #       omega_A = CBF(A_1, A_2)
+        #       omega_T = omega_A (*) omega_C
+        #
+        #    Trust discounting scales belief and disbelief equally and transfers
+        #    the removed committed mass into uncertainty.  A sensor dropout can
+        #    therefore increase u_T without inventing statistical inconsistency.
         # ------------------------------------------------------------------
-        trusted_local_inputs = []
+        local_consistency_inputs = []
+        availability_inputs = []
+
         for sensor_id in sensor_ids:
-            c_s_track = track_fusion_isolated_states[
-                sensor_id
-            ].latest_opinion
-            a_s = availability_states[sensor_id].latest_opinion
+            c_s_iso = deepcopy(isolated_states[sensor_id].latest_opinion)
+            a_s = deepcopy(availability_states[sensor_id].latest_opinion)
 
-            trusted = trust_discount(a_s, c_s_track)
+            # Diagnostic: how the local consistency opinion looks when interpreted
+            # through the current availability of that same sensor.
+            trusted = trust_discount(a_s, c_s_iso)
             trusted_sensor_history[sensor_id].append(trusted)
-            trusted_local_inputs.append(trusted)
 
-        # Local-only WBF is retained purely as an interpretable diagnostic.
-        # It is not an additional stage in the final fusion cascade.
-        local_support = fuse_weighted(trusted_local_inputs)
-        local_support_history.append(local_support)
+            local_consistency_inputs.append(c_s_iso)
+            availability_inputs.append(a_s)
 
-        # One baseline WBF over all consistency views that answer the same
-        # higher-level question about the current track/filter consistency.
-        baseline_track = fuse_weighted(
-            [
-                *trusted_local_inputs,
-                track_fusion_batch_state.latest_opinion,
-            ]
+        central_consistency = deepcopy(batch_track_state.latest_opinion)
+
+        # Nominal branch: several related consistency sources support the same
+        # higher-level statement that the current track generation is consistent.
+        track_base = fuse_weighted(
+            [*local_consistency_inputs, central_consistency]
         )
-        # Keep the existing result-field name for backward compatibility with
-        # plotting/analysis code; semantically this is omega_B, not omega_S.
-        sensor_support_history.append(baseline_track)
+        track_base_history.append(track_base)
 
-        if (
-            track_fusion_disagreement_state is not None
-            and len(sensor_ids) == 2
-        ):
-            a_pair = pair_availability_support([
-                availability_states[sensor_id].latest_opinion
-                for sensor_id in sensor_ids
-            ])
-            pair_availability_history.append(a_pair)
+        # Disagreement branch: if the sensors do not agree, retaining trust in
+        # the track requires simultaneous support from all local and central
+        # consistency statements.  This branch is NOT applied in the nominal
+        # agreement regime.
+        track_strict = logical_and(
+            [*local_consistency_inputs, central_consistency]
+        )
+        track_strict_history.append(track_strict)
 
-            pair_for_deduction = trust_discount(
-                a_pair,
-                track_fusion_disagreement_state.latest_opinion,
-            )
-            trusted_pair_history.append(pair_for_deduction)
-
-            track_not_trustworthy = dogmatic_binomial(
-                False,
-                prior_ok_value=prior_ok(baseline_track),
-            )
-            track_output_trust = subjective_logic_deduction(
-                pair_for_deduction,
-                baseline_track,
-                track_not_trustworthy,
+        if disagreement_state is not None:
+            pair_agreement = deepcopy(disagreement_state.latest_opinion)
+            track_consistency = subjective_logic_deduction(
+                pair_agreement,
+                track_base,
+                track_strict,
             )
         else:
-            # Without a pair channel there is no disagreement antecedent to
-            # condition on; the baseline is then the complete online opinion.
-            a_pair = vacuous_binomial()
-            pair_for_deduction = vacuous_binomial()
-            pair_availability_history.append(a_pair)
-            trusted_pair_history.append(pair_for_deduction)
-            track_output_trust = deepcopy(baseline_track)
+            track_consistency = deepcopy(track_base)
 
+        track_consistency_history.append(track_consistency)
+
+        # Availability is intentionally the final modifier.  CBF aggregates the
+        # independent expected-output evidence of the sensor paths; the resulting
+        # opinion acts as reliability trust for the consistency-derived track
+        # opinion, shifting missing-information effects to uncertainty.
+        combined_availability = fuse_cumulative(availability_inputs)
+        combined_availability_history.append(combined_availability)
+
+        track_output_trust = trust_discount(
+            combined_availability,
+            track_consistency,
+        )
         track_output_trust_history.append(track_output_trust)
 
         # Common-prediction PIT/TEF architecture baseline.  This holds the last
@@ -2720,15 +2499,12 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         availability_states=availability_states,
         disagreement_state=disagreement_state,
         batch_track_state=batch_track_state,
-        track_fusion_isolated_states=track_fusion_isolated_states,
-        track_fusion_disagreement_state=track_fusion_disagreement_state,
-        track_fusion_batch_state=track_fusion_batch_state,
         griebel=griebel,
         trusted_sensor_history=trusted_sensor_history,
-        local_support_history=local_support_history,
-        pair_availability_history=pair_availability_history,
-        trusted_pair_history=trusted_pair_history,
-        sensor_support_history=sensor_support_history,
+        track_base_history=track_base_history,
+        track_strict_history=track_strict_history,
+        track_consistency_history=track_consistency_history,
+        combined_availability_history=combined_availability_history,
         track_output_trust_history=track_output_trust_history,
         common_abf_history=common_abf_history,
         batch_history=batch_history,
@@ -3011,79 +2787,28 @@ def plot_static_results(result: ProcessingResult) -> None:
     # ------------------------------------------------------------------
     if result.disagreement_state is not None:
         pair = result.disagreement_state
-        fig, axes = plt.subplots(4, 1, figsize=(15, 11), sharex=True)
-        pair_d_norm = normalized_disbelief_series(
-            pair.disbelief_events,
-            pair.uncertainty_events,
-        )
-        axes[0].plot(
-            pair.event_times_s,
-            pair_d_norm,
-            color="tab:cyan",
-            linewidth=1.7,
-            label=r"pair disagreement $d_{\mathrm{norm},D_{12}}$",
-        )
-        axes[1].plot(
-            pair.event_times_s,
-            pair.uncertainty_events,
-            color="tab:cyan",
-            linewidth=1.5,
-            label=r"pair agreement uncertainty $u_{D_{12}}$",
-        )
-
-        # Raw pair NIS makes sparse outliers visible even when the TEF opinion is
-        # intentionally smoother. This is useful for distinguishing a genuine
-        # statistic-generation bug from a modest distribution-level response.
-        axes[2].plot(
-            pair.event_times_s,
-            pair.radial_nis_events,
-            color="tab:purple",
-            linewidth=0.9,
-            alpha=0.85,
-            label=r"pair NIS $\Delta z^T S_\Delta^{-1}\Delta z$",
-        )
-        axes[2].axhline(
-            chi2.ppf(0.99, df=2),
-            color="gray",
-            linestyle="--",
-            linewidth=0.9,
-            label=r"$\chi^2_2$ 99% threshold",
-        )
-
-        axes[3].plot(
-            pair.event_times_s,
-            pair.mean_standardized_x_events,
-            color="tab:blue",
-            linewidth=1.5,
-            label=r"mean $(z_{1,x}-z_{2,x})/\sigma_{\Delta x}$",
-        )
-        axes[3].plot(
-            pair.event_times_s,
-            pair.mean_standardized_y_events,
-            color="tab:orange",
-            linewidth=1.5,
-            label=r"mean $(z_{1,y}-z_{2,y})/\sigma_{\Delta y}$",
-        )
-        axes[3].axhline(0.0, color="black", linestyle=":", linewidth=1.0)
-        axes[3].axhline(2.0, color="gray", linestyle="--", linewidth=0.9)
-        axes[3].axhline(-2.0, color="gray", linestyle="--", linewidth=0.9)
-
+        fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
+        pair_d_norm = normalized_disbelief_series(pair.disbelief_events, pair.uncertainty_events)
+        axes[0].plot(pair.event_times_s, pair_d_norm, color="tab:cyan", linewidth=1.7,
+                     label=r"pair disagreement $d_{\mathrm{norm},D_{12}}$")
+        axes[1].plot(pair.event_times_s, pair.uncertainty_events, color="tab:cyan", linewidth=1.5,
+                     label=r"pair agreement uncertainty $u_{D_{12}}$")
+        axes[2].plot(pair.event_times_s, pair.mean_standardized_x_events, color="tab:blue", linewidth=1.5,
+                     label=r"mean $(z_{1,x}-z_{2,x})/\sigma_{\Delta x}$")
+        axes[2].plot(pair.event_times_s, pair.mean_standardized_y_events, color="tab:orange", linewidth=1.5,
+                     label=r"mean $(z_{1,y}-z_{2,y})/\sigma_{\Delta y}$")
+        axes[2].axhline(0.0, color="black", linestyle=":", linewidth=1.0)
+        axes[2].axhline(2.0, color="gray", linestyle="--", linewidth=0.9)
+        axes[2].axhline(-2.0, color="gray", linestyle="--", linewidth=0.9)
         axes[0].set_ylabel(r"normalized disagreement $d_{\mathrm{norm}}$")
         axes[1].set_ylabel("uncertainty")
-        axes[2].set_ylabel("pair NIS")
-        axes[3].set_ylabel("standardized relative offset")
-        axes[3].set_xlabel("time [s]")
-        axes[0].set_ylim(-0.02, 1.02)
-        axes[1].set_ylim(-0.02, 1.02)
+        axes[2].set_ylabel("standardized relative offset")
+        axes[2].set_xlabel("time [s]")
+        axes[0].set_ylim(-0.02,1.02); axes[1].set_ylim(-0.02,1.02)
         for axis in axes:
-            axis.grid(True)
-            axis.legend(loc="upper right")
-            add_disturbance_spans(axis)
-        fig.suptitle(
-            "Direct sensor-to-sensor disagreement diagnostic\n"
-            + r"$\Delta z=z_1-z_2,\quad S_\Delta=R_1+R_2$; "
-              r"independent of the central KF prior"
-        )
+            axis.grid(True); axis.legend(loc="upper right"); add_disturbance_spans(axis)
+        fig.suptitle("Direct sensor-to-sensor disagreement diagnostic\n" +
+                     r"$\Delta z=z_1-z_2,\quad S_\Delta=R_1+R_2$; independent of the central KF prior")
         fig.tight_layout()
 
     # ------------------------------------------------------------------
@@ -3250,113 +2975,108 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Hierarchical sensor-support and final track-trust opinions.
+    # Hierarchical consistency -> conditional reasoning -> availability trust.
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
 
-    # Inputs to the output-level reasoning: availability-discounted isolated
-    # consistency plus the pair-agreement antecedent.
+    # Raw online consistency inputs.  Availability is intentionally not folded
+    # into these curves so statistical inconsistency and missing information stay
+    # visually distinguishable.
     for sensor_id in sensor_ids:
-        colour = result.isolated_states[sensor_id].colour
+        state = result.isolated_states[sensor_id]
         axes[0].plot(
-            event_times,
-            [
-                normalized_disbelief(op)
-                for op in result.trusted_sensor_history[sensor_id]
-            ],
-            color=colour,
+            state.event_times_s,
+            normalized_disbelief_series(
+                state.disbelief_events,
+                state.uncertainty_events,
+            ),
+            color=state.colour,
             linewidth=1.35,
-            label=rf"$\widetilde{{C}}_{{{sensor_id},T}}=A_{{{sensor_id}}}\otimes C_{{{sensor_id},T}}^{{iso}}$",
+            label=rf"$C_{{{sensor_id}}}^{{iso}}$: $d_{{\mathrm{{norm}}}}$",
         )
 
-    if result.track_fusion_disagreement_state is not None:
+    if result.disagreement_state is not None:
+        pair = result.disagreement_state
         axes[0].plot(
-            event_times,
-            [
-                normalized_disbelief(op)
-                for op in result.trusted_pair_history
-            ],
+            pair.event_times_s,
+            normalized_disbelief_series(
+                pair.disbelief_events,
+                pair.uncertainty_events,
+            ),
             color="tab:cyan",
             linewidth=1.5,
-            label=(
-                r"$\widetilde{G}_{12,T}=A_{12}\otimes G_{12,T}$: "
-                r"$d_{\mathrm{norm}}$"
-            ),
+            label=r"$G_{12}$ disagreement: $d_{\mathrm{norm}}$",
         )
 
-    # Higher-level support and final output opinion.
-    axes[1].plot(
+    axes[0].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.local_support_history],
-        color="tab:olive",
-        linewidth=1.2,
-        linestyle="--",
-        label=r"local-only WBF $\omega_L$: $d_{\mathrm{norm}}$",
-    )
-    axes[1].plot(
-        event_times,
-        [normalized_disbelief(op) for op in result.sensor_support_history],
-        color="tab:green",
-        linewidth=1.6,
-        label=r"baseline track $\omega_B$: $d_{\mathrm{norm}}$",
-    )
-    axes[1].plot(
-        result.track_fusion_batch_state.event_times_s,
-        normalized_disbelief_series(
-            result.track_fusion_batch_state.disbelief_events,
-            result.track_fusion_batch_state.uncertainty_events,
-        ),
+        [normalized_disbelief(op) for op in result.batch_history],
         color="tab:purple",
-        linewidth=1.2,
-        alpha=0.8,
-        label=r"central filter $\omega_{C_{F,T}}$: $d_{\mathrm{norm}}$",
-    )
-    axes[1].plot(
-        event_times,
-        [
-            normalized_disbelief(op)
-            for op in result.track_output_trust_history
-        ],
-        color="tab:red",
-        linewidth=1.8,
-        label=r"track trust $\omega_T$: $d_{\mathrm{norm}}$",
+        linewidth=1.15,
+        alpha=0.85,
+        label=r"$C_F$: $d_{\mathrm{norm}}$",
     )
 
-    axes[2].plot(
+    # Higher-level consistency path and final track trust.
+    axes[1].plot(
         event_times,
-        [uncertainty(op) for op in result.local_support_history],
-        color="tab:olive",
-        linewidth=1.1,
-        linestyle="--",
-        label=r"local-only WBF $u_L$",
-    )
-    axes[2].plot(
-        event_times,
-        [uncertainty(op) for op in result.sensor_support_history],
+        [normalized_disbelief(op) for op in result.track_base_history],
         color="tab:green",
-        linewidth=1.5,
-        label=r"baseline track $u_B$",
+        linewidth=1.35,
+        label=r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$",
+    )
+    axes[1].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.track_strict_history],
+        color="tab:gray",
+        linewidth=1.0,
+        linestyle="--",
+        alpha=0.75,
+        label=r"$\omega_{\mathrm{strict}}=C_1^{iso}\wedge C_2^{iso}\wedge C_F$",
+    )
+    axes[1].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.track_consistency_history],
+        color="tab:blue",
+        linewidth=1.6,
+        label=r"$\omega_C=\mathrm{Deduction}(G_{12};\omega_B,\omega_{\mathrm{strict}})$",
+    )
+    axes[1].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.track_output_trust_history],
+        color="tab:red",
+        linewidth=1.9,
+        label=r"final track trust $\omega_T$: $d_{\mathrm{norm}}$",
+    )
+
+    # Availability should manifest primarily as uncertainty in the final output.
+    axes[2].plot(
+        event_times,
+        [uncertainty(op) for op in result.combined_availability_history],
+        color="tab:orange",
+        linewidth=1.35,
+        label=r"combined availability $u_{A_{12}}$",
     )
     axes[2].plot(
-        result.track_fusion_batch_state.event_times_s,
-        result.track_fusion_batch_state.uncertainty_events,
-        color="tab:purple",
-        linewidth=1.2,
-        alpha=0.8,
-        label=r"central filter $u_{C_{F,T}}$",
+        event_times,
+        [uncertainty(op) for op in result.track_consistency_history],
+        color="tab:blue",
+        linewidth=1.35,
+        label=r"pair-conditioned consistency $u_C$",
     )
     axes[2].plot(
         event_times,
         [uncertainty(op) for op in result.track_output_trust_history],
         color="tab:red",
-        linewidth=1.8,
-        label=r"track trust $u_T$",
+        linewidth=1.9,
+        label=r"final track trust $u_T$",
     )
 
     axes[0].set_ylabel(r"input $d_{\mathrm{norm}}$")
-    axes[1].set_ylabel(r"higher-level $d_{\mathrm{norm}}$")
+    axes[1].set_ylabel(r"track $d_{\mathrm{norm}}$")
     axes[2].set_ylabel("uncertainty")
     axes[2].set_xlabel("time [s]")
+
     for axis in axes:
         axis.grid(True)
         axis.legend(loc="upper right")
@@ -3364,14 +3084,12 @@ def plot_static_results(result: ProcessingResult) -> None:
         axis.set_ylim(-0.02, 1.02)
 
     fig.suptitle(
-        f"[{SCRIPT_BUILD}] Hierarchical Subjective-Logic track trust "
-        rf"($T_{{SA}}={STATISTICAL_SHORT_TERM_HORIZON_S:g}$ s, "
-        rf"$T_A={AVAILABILITY_SHORT_TERM_HORIZON_S:g}$ s)\n"
-        r"$\widetilde{C}_s=A_s\otimes C_s^{iso}$; "
-        r"$\omega_B=\mathrm{WBF}(\widetilde{C}_1,\widetilde{C}_2,\omega_{C_F})$; "
-        r"$\widetilde{G}_{12}=A_{12}\otimes G_{12}$; "
-        r"$\omega_T=\mathrm{Deduction}(\widetilde{G}_{12}; "
-        r"\omega_{T|G}=\omega_B,\ \omega_{T|\neg G}=\mathrm{FALSE})$"
+        "Hierarchical Subjective-Logic track trust — conditional disagreement + availability trust\n"
+        r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$; "
+        r"$\omega_{\mathrm{strict}}=C_1^{iso}\wedge C_2^{iso}\wedge C_F$; "
+        r"$\omega_C=\mathrm{Deduction}(G_{12};\omega_B,\omega_{\mathrm{strict}})$; "
+        r"$\omega_A=\mathrm{CBF}(A_1,A_2)$; "
+        r"$\omega_T=\omega_A\otimes\omega_C$"
     )
     fig.tight_layout()
 
@@ -3661,18 +3379,21 @@ def show_dynamic_animation(
         a1 = _state_triplet_at_time(result.availability_states[1], elapsed_s)
         a2 = _state_triplet_at_time(result.availability_states[2], elapsed_s)
 
-        trusted1 = history_triplet(result.trusted_sensor_history[1], step)
-        trusted2 = history_triplet(result.trusted_sensor_history[2], step)
-        c_f = _state_triplet_at_time(
-            result.track_fusion_batch_state, elapsed_s
+        c_f = history_triplet(result.batch_history, step)
+        combined_availability = history_triplet(
+            result.combined_availability_history, step
         )
-        sensor_support = history_triplet(result.sensor_support_history, step)
+        track_consistency = history_triplet(
+            result.track_consistency_history, step
+        )
         track_trust = history_triplet(
             result.track_output_trust_history, step
         )
-        # The deduction antecedent is the pair-agreement opinion after pair
-        # availability trust discounting, not the raw G_12 diagnostic state.
-        pair_agreement = history_triplet(result.trusted_pair_history, step)
+        pair_agreement = (
+            _state_triplet_at_time(result.disagreement_state, elapsed_s)
+            if result.disagreement_state is not None
+            else _vacuous_triplet()
+        )
 
         return [
             [
@@ -3684,14 +3405,11 @@ def show_dynamic_animation(
                 ("C2 common", c2_common, "gray"),
             ],
             [("A1", a1, "royalblue"), ("A2", a2, "darkorange")],
-            [
-                ("A1 ⊗ C1 iso", trusted1, "royalblue"),
-                ("A2 ⊗ C2 iso", trusted2, "darkorange"),
-            ],
-            [("G12 pair agreement (5 s)", pair_agreement, "cyan")],
-            [("C_F (5 s)", c_f, "purple")],
-            [("ω_B baseline track", sensor_support, "green")],
-            [("ω_T track trust", track_trust, "red")],
+            [("A12 CBF", combined_availability, "darkorange")],
+            [("G12 pair agreement", pair_agreement, "cyan")],
+            [("C_F", c_f, "purple")],
+            [("ω_C conditional consistency", track_consistency, "green")],
+            [("ω_T final track trust", track_trust, "red")],
         ]
 
     fig = make_subplots(
@@ -3707,12 +3425,12 @@ def show_dynamic_animation(
             "Track follow view",
             "Sensor 1 consistency",
             "Sensor 2 consistency",
-            "Availability",
-            "Availability-discounted consistency",
-            "Pair agreement antecedent (5 s)",
-            "Central filter consistency (5 s)",
-            "Baseline track consistency",
-            "Track trust after deduction",
+            "Sensor availability",
+            "Combined availability (CBF)",
+            "Pair agreement",
+            "Central filter consistency",
+            "Pair-conditioned track consistency",
+            "Final track trust",
         ],
         horizontal_spacing=0.04,
         vertical_spacing=0.05,
@@ -4157,38 +3875,6 @@ def print_summary(result: ProcessingResult) -> None:
             f"(delta={common - nominal_common:+.3f})"
         )
 
-    if result.disagreement_state is not None:
-        pair = result.disagreement_state
-        pair_times = np.asarray(pair.event_times_s, dtype=float)
-        pair_nis = np.asarray(pair.radial_nis_events, dtype=float)
-        mask = (
-            (pair_times >= OUTLIER_INTERVAL_S[0])
-            & (pair_times < OUTLIER_INTERVAL_S[1])
-            & np.isfinite(pair_nis)
-        )
-        if np.any(mask):
-            pair_nis_threshold = float(chi2.ppf(0.99, df=2))
-            exceedance_fraction = float(
-                np.mean(pair_nis[mask] > pair_nis_threshold)
-            )
-            print("\nPair-channel outlier sanity check")
-            print(
-                f"  physical outlier period: {OUTLIER_PERIOD_S:g} s "
-                f"(strength={OUTLIER_STRENGTH:g})"
-            )
-            print(
-                "  simultaneous pair samples in outlier interval: "
-                f"{int(np.sum(mask))}"
-            )
-            print(
-                "  fraction of raw pair NIS above chi2_2 99% threshold: "
-                f"{exceedance_fraction:.3f}"
-            )
-            print(
-                "  Note: sparse outliers can be obvious in raw NIS while the "
-                "distribution-level TEF d_norm rises only moderately."
-            )
-
     if ENABLE_SENSOR_2_DROPOUT:
         a2 = result.availability_states[2]
         print("\nSensor-2 dropout")
@@ -4211,28 +3897,23 @@ def print_summary(result: ProcessingResult) -> None:
     print("  C_s^common    : same PIT/TEF mapping but central common prior")
     print("  A_s           : expected output availability")
     print("  dropout       : freezes statistical consistency channels; A_s carries missingness")
-    print("  C~_s=A_s(*)C_s^iso: availability-discounted local consistency")
+    print("  C~_s=A_s(*)C_s^iso: local availability-discounted diagnostic only")
     print("  G_12          : direct pair-agreement opinion; d_norm quantifies disagreement")
-    print("  omega_L       : WBF(C~_1, C~_2), local-only diagnostic")
-    print(
-        "  omega_A12     : "
-        f"{PAIR_AVAILABILITY_COMBINATION}(A_1, A_2), pair availability support"
-    )
-    print("  G~_12         : omega_A12(*)G_12, deduction antecedent")
-    print("  C_F           : direct active-batch consistency")
-    print("  omega_B       : WBF(C~_1, C~_2, C_F), baseline track consistency")
-    print(
-        "  omega_T       : Deduction(G~_12; T|G=omega_B, T|not G=FALSE), "
-        "current-track trustworthiness"
-    )
+    print("  C_F           : direct consistency of the actually used central measurement batch")
+    print("  omega_B       : WBF(C_1^iso, C_2^iso, C_F), nominal/base track consistency")
+    print("  omega_strict  : AND(C_1^iso, C_2^iso, C_F), conditional disagreement branch")
+    print("  omega_C       : Deduction(G_12; omega_B, omega_strict)")
+    print("  omega_A       : CBF(A_1, A_2), combined expected-information availability")
+    print("  omega_T       : trust_discount(omega_A, omega_C), current-track trustworthiness")
 
 
 def main() -> None:
-    print(f"SCRIPT BUILD: {SCRIPT_BUILD}")
-    print("TRACK TRUST: native Subjective-Logic deduction enabled")
     print("=" * 88)
+    print("SCRIPT BUILD: V7_TRACK_TRUST_CONDITIONAL_AVAILABILITY_2026-08-09")
+    print("TRACK TRUST PIPELINE: CONDITIONAL DISAGREEMENT + FINAL AVAILABILITY TRUST")
+    print("omega_B=WBF(C1_iso,C2_iso,C_F); omega_C=Deduction(G12; omega_B, omega_strict); omega_A=CBF(A1,A2); omega_T=omega_A(*)omega_C")
     if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
-        print("V6 SYNCHRONOUS SPECIAL CASE: Sensor 1 = Sensor 2 = 10 Hz")
+        print("V7 SYNCHRONOUS SPECIAL CASE: Sensor 1 = Sensor 2 = 10 Hz")
         if ENABLE_SENSOR_2_DROPOUT:
             print(
                 "NOTE: Sensor-2 dropout is enabled. Disable it for the pure "
@@ -4240,12 +3921,12 @@ def main() -> None:
             )
     elif CROSS_CONTAMINATION_RATE_STRESS_TEST:
         print(
-            "V6 ASYNCHRONOUS CROSS-CONTAMINATION STRESS TEST: "
+            "V7 ASYNCHRONOUS CROSS-CONTAMINATION STRESS TEST: "
             f"disturbed Sensor 1 = {SENSOR_1_RATE_HZ:g} Hz, "
             f"nominal Sensor 2 = {SENSOR_2_RATE_HZ:g} Hz"
         )
     else:
-        print(f"V6 ASYNCHRONOUS MULTI-RATE CASE: Sensor 1 = {SENSOR_1_RATE_HZ:g} Hz, Sensor 2 = {SENSOR_2_RATE_HZ:g} Hz")
+        print(f"V7 ASYNCHRONOUS MULTI-RATE CASE: Sensor 1 = {SENSOR_1_RATE_HZ:g} Hz, Sensor 2 = {SENSOR_2_RATE_HZ:g} Hz")
     print(f"Filter motion model: {'CT' if USE_CT_MODEL else 'CV'}")
     print("=" * 88)
 
