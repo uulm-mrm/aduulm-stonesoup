@@ -167,12 +167,12 @@ SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
 # Sensor 1 is intentionally much faster than nominal Sensor 2, so several
 # faulty S1 updates can affect the central prior before the next S2 update.
-CROSS_CONTAMINATION_RATE_STRESS_TEST = True
+CROSS_CONTAMINATION_RATE_STRESS_TEST = False
 
 NOMINAL_SENSOR_1_RATE_HZ = 10.0
 NOMINAL_SENSOR_2_RATE_HZ = 12.5
-CROSS_CONTAMINATION_SENSOR_1_RATE_HZ = 10.0
-CROSS_CONTAMINATION_SENSOR_2_RATE_HZ = 25.0
+CROSS_CONTAMINATION_SENSOR_1_RATE_HZ = 25.0
+CROSS_CONTAMINATION_SENSOR_2_RATE_HZ = 10.0
 SYNCHRONOUS_REFERENCE_RATE_HZ = 10.0
 
 if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
@@ -308,14 +308,15 @@ NUM_PIT_BINS = 7
 # -----------------------------------------------------------------------------
 # Time-normalised TEF settings
 # -----------------------------------------------------------------------------
+UNIFORM_TIME_HORIZON = 5.0
 # Local sensor-consistency channels assess the PIT distribution over a
 # short physical history.  The number of TEF samples is derived from the
 # actual sensor rate.
-CONSISTENCY_SHORT_TERM_HORIZON_S = 5.0
+CONSISTENCY_SHORT_TERM_HORIZON_S = UNIFORM_TIME_HORIZON
 
 # The same physical short-term horizon is used across consistency families.
 # Different event rates are handled by rate-normalised n_ST values.
-BATCH_SHORT_TERM_HORIZON_S = 5.0
+BATCH_SHORT_TERM_HORIZON_S = UNIFORM_TIME_HORIZON
 
 # Availability is a distinct proposition but uses the same physical horizon so
 # that output-level opinions refer to comparable recent time spans.
@@ -324,7 +325,7 @@ AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 # Pair agreement/disagreement is updated only at simultaneous sensor
 # timestamps. The same physical horizon is used for comparability; its sample
 # count is derived from the actual simultaneous-event rate.
-DISAGREEMENT_SHORT_TERM_HORIZON_S = 5.0
+DISAGREEMENT_SHORT_TERM_HORIZON_S = UNIFORM_TIME_HORIZON
 
 REFERENCE_RATE_HZ = 10.0
 # Match the first PIT paper's nominal long-term discount at the reference rate.
