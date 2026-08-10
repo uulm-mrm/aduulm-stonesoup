@@ -319,7 +319,7 @@ BATCH_SHORT_TERM_HORIZON_S = 5.0
 
 # Availability is a distinct proposition but uses the same physical horizon so
 # that output-level opinions refer to comparable recent time spans.
-AVAILABILITY_SHORT_TERM_HORIZON_S = 5.0
+AVAILABILITY_SHORT_TERM_HORIZON_S = 1.0
 
 # Pair agreement/disagreement is updated only at simultaneous sensor
 # timestamps. The same physical horizon is used for comparability; its sample
@@ -2434,7 +2434,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         # independent expected-output evidence of the sensor paths; the resulting
         # opinion acts as reliability trust for the consistency-derived track
         # opinion, shifting missing-information effects to uncertainty.
-        combined_availability = fuse_cumulative(availability_inputs)
+        combined_availability = fuse_average(availability_inputs)
         combined_availability_history.append(combined_availability)
 
         track_output_trust = trust_discount(
