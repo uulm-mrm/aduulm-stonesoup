@@ -54,7 +54,7 @@ separating the assessment into semantically distinct opinions:
 
 8. Pair-conditioned consistency and final track trustworthiness T
        omega_C = Deduction(G_12; omega_B, omega_strict)
-       omega_A = CBF(A_1, A_2)
+       omega_A = ABF(A_1, A_2)
        omega_T = trust_discount(omega_A, omega_C)
    - pair agreement selects continuously between a permissive WBF branch and a
      stricter conjunction branch; there is no dogmatic FALSE conditional,
@@ -281,7 +281,7 @@ GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP = True
 #                      omega_{C|G_12}     = omega_B,
 #                      omega_{C|not G_12} = omega_strict
 #                  )
-#   omega_A      = CBF(A_1, A_2)
+#   omega_A      = ABF(A_1, A_2)
 #   omega_T      = trust_discount(omega_A, omega_C)
 #
 # Rationale:
@@ -2074,12 +2074,16 @@ class ProcessingResult:
     track_consistency_history: list
 
     # Availability support from independent expected-output evidence:
-    # omega_A = CBF(A_1, A_2)
+    # omega_A = ABF(A_1, A_2)
     combined_availability_history: list
 
-    # Final current-track trust:
+    # Final current-track trust (unchanged):
     # omega_T = trust_discount(omega_A, omega_C)
     track_output_trust_history: list
+
+    # System health as logical conjunction of track consistency and availability:
+    # omega_H = omega_C * omega_A
+    system_health_history: list
 
     # Architecture/reference histories retained for comparison.
     common_abf_history: list
@@ -2200,6 +2204,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
     track_consistency_history: list = []
     combined_availability_history: list = []
     track_output_trust_history: list = []
+    system_health_history: list = []
     common_abf_history: list = []
     batch_history: list = []
 
@@ -2375,10 +2380,10 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         #    the track.  Unlike the previous FALSE branch, ordinary nominal
         #    fluctuations of G_12 do not automatically imply a bad track.
         #
-        # 5) Combine availability evidence using CBF and apply it as reliability
+        # 5) Combine availability opinions using ABF and apply it as reliability
         #    trust to the already constructed consistency opinion:
         #
-        #       omega_A = CBF(A_1, A_2)
+        #       omega_A = ABF(A_1, A_2)
         #       omega_T = omega_A (*) omega_C
         #
         #    Trust discounting scales belief and disbelief equally and transfers
@@ -2430,8 +2435,8 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
 
         track_consistency_history.append(track_consistency)
 
-        # Availability is intentionally the final modifier.  CBF aggregates the
-        # independent expected-output evidence of the sensor paths; the resulting
+        # Availability is intentionally the final modifier.  ABF aggregates the
+        # expected-output availability opinions of the sensor paths; the resulting
         # opinion acts as reliability trust for the consistency-derived track
         # opinion, shifting missing-information effects to uncertainty.
         combined_availability = fuse_average(availability_inputs)
@@ -2442,6 +2447,15 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
             track_consistency,
         )
         track_output_trust_history.append(track_output_trust)
+
+        # System health is a separate higher-level proposition.  Unlike the
+        # reliability discount used for omega_T, this is the SL conjunction
+        # requested for H: omega_H = omega_C * omega_A.
+        system_health = logical_and([
+            track_consistency,
+            combined_availability,
+        ])
+        system_health_history.append(system_health)
 
         # Common-prediction PIT/TEF architecture baseline.  This holds the last
         # inactive sensor opinion in asynchronous mode and is NOT called Griebel.
@@ -2506,6 +2520,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         track_consistency_history=track_consistency_history,
         combined_availability_history=combined_availability_history,
         track_output_trust_history=track_output_trust_history,
+        system_health_history=system_health_history,
         common_abf_history=common_abf_history,
         batch_history=batch_history,
         position_error=position_error,
@@ -3048,6 +3063,14 @@ def plot_static_results(result: ProcessingResult) -> None:
         linewidth=1.9,
         label=r"final track trust $\omega_T$: $d_{\mathrm{norm}}$",
     )
+    axes[1].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.system_health_history],
+        color="tab:pink",
+        linewidth=1.7,
+        linestyle="--",
+        label=r"system health $\omega_H=\omega_C\cdot\omega_A$: $d_{\mathrm{norm}}$",
+    )
 
     # Availability should manifest primarily as uncertainty in the final output.
     axes[2].plot(
@@ -3071,9 +3094,20 @@ def plot_static_results(result: ProcessingResult) -> None:
         linewidth=1.9,
         label=r"final track trust $u_T$",
     )
+    axes[2].plot(
+        event_times,
+        [uncertainty(op) for op in result.system_health_history],
+        color="tab:pink",
+        linewidth=1.7,
+        linestyle="--",
+        label=r"system health $u_H$",
+    )
 
+    axes[0].set_title("Consistency assessment inputs")
+    axes[1].set_title("Track consistency, final track trust, and system health")
+    axes[2].set_title("Availability and uncertainty propagation")
     axes[0].set_ylabel(r"input $d_{\mathrm{norm}}$")
-    axes[1].set_ylabel(r"track $d_{\mathrm{norm}}$")
+    axes[1].set_ylabel(r"track / health $d_{\mathrm{norm}}$")
     axes[2].set_ylabel("uncertainty")
     axes[2].set_xlabel("time [s]")
 
@@ -3084,12 +3118,13 @@ def plot_static_results(result: ProcessingResult) -> None:
         axis.set_ylim(-0.02, 1.02)
 
     fig.suptitle(
-        "Hierarchical Subjective-Logic track trust — conditional disagreement + availability trust\n"
+        "Hierarchical Subjective-Logic self-assessment — track trust and system health\n"
         r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$; "
         r"$\omega_{\mathrm{strict}}=C_1^{iso}\wedge C_2^{iso}\wedge C_F$; "
         r"$\omega_C=\mathrm{Deduction}(G_{12};\omega_B,\omega_{\mathrm{strict}})$; "
-        r"$\omega_A=\mathrm{CBF}(A_1,A_2)$; "
-        r"$\omega_T=\omega_A\otimes\omega_C$"
+        r"$\omega_A=\mathrm{ABF}(A_1,A_2)$; "
+        r"$\omega_T=\omega_A\otimes\omega_C$; "
+        r"$\omega_H=\omega_C\cdot\omega_A$"
     )
     fig.tight_layout()
 
@@ -3389,6 +3424,9 @@ def show_dynamic_animation(
         track_trust = history_triplet(
             result.track_output_trust_history, step
         )
+        system_health = history_triplet(
+            result.system_health_history, step
+        )
         pair_agreement = (
             _state_triplet_at_time(result.disagreement_state, elapsed_s)
             if result.disagreement_state is not None
@@ -3405,11 +3443,15 @@ def show_dynamic_animation(
                 ("C2 common", c2_common, "gray"),
             ],
             [("A1", a1, "royalblue"), ("A2", a2, "darkorange")],
-            [("A12 CBF", combined_availability, "darkorange")],
-            [("G12 pair agreement", pair_agreement, "cyan")],
+            [("A12 ABF", combined_availability, "darkorange")],
+            [("G12 inter-sensor agreement", pair_agreement, "cyan")],
             [("C_F", c_f, "purple")],
-            [("ω_C conditional consistency", track_consistency, "green")],
-            [("ω_T final track trust", track_trust, "red")],
+            [("ω_C pair-conditioned consistency", track_consistency, "green")],
+            [
+                ("ω_T final track trust", track_trust, "red"),
+                ("ω_H system health", system_health, "magenta")
+            ],
+            # [("ω_H system health", system_health, "magenta")],
         ]
 
     fig = make_subplots(
@@ -3420,17 +3462,19 @@ def show_dynamic_animation(
             [None, None, {"type": "ternary"}, {"type": "ternary"}],
             [None, None, {"type": "ternary"}, {"type": "ternary"}],
             [None, None, {"type": "ternary"}, {"type": "ternary"}],
+            # [None, None, {"type": "ternary"}, None],
         ],
         subplot_titles=[
             "Track follow view",
             "Sensor 1 consistency",
             "Sensor 2 consistency",
             "Sensor availability",
-            "Combined availability (CBF)",
-            "Pair agreement",
-            "Central filter consistency",
-            "Pair-conditioned track consistency",
-            "Final track trust",
+            "Availability (ABF)",
+            "Inter-sensor agreement",
+            "Central track-filter",
+            "Pair-conditioned track",
+            "Final opinions",
+            # "System health",
         ],
         horizontal_spacing=0.04,
         vertical_spacing=0.05,
@@ -3442,7 +3486,7 @@ def show_dynamic_animation(
             annotation.update(font=dict(size=15))
         else:
             annotation.update(
-                x=annotation.x - 0.10,
+                x=annotation.x - 0.12,
                 y=annotation.y - 0.05,
                 xanchor="left",
                 align="left",
@@ -3602,6 +3646,7 @@ def show_dynamic_animation(
         (2, 3), (2, 4),
         (3, 3), (3, 4),
         (4, 3), (4, 4),
+        # (5, 3),
     ]
     for entries, (row, col) in zip(opinion_panels(initial_step), ternary_positions):
         fig.add_trace(_ternary_marker_trace(go, entries), row=row, col=col)
@@ -3641,7 +3686,7 @@ def show_dynamic_animation(
 
     fig.update_layout(
         title=(
-            "Dynamic event-based multi-sensor self-assessment and track trust"
+            "Dynamic event-based multi-sensor self-assessment — track trust and system health"
             f"<br><sup>{rate_mode}; S1={SENSOR_1_RATE_HZ:g} Hz, "
             f"S2={SENSOR_2_RATE_HZ:g} Hz; filter={model_label}</sup>"
         ),
@@ -3903,15 +3948,16 @@ def print_summary(result: ProcessingResult) -> None:
     print("  omega_B       : WBF(C_1^iso, C_2^iso, C_F), nominal/base track consistency")
     print("  omega_strict  : AND(C_1^iso, C_2^iso, C_F), conditional disagreement branch")
     print("  omega_C       : Deduction(G_12; omega_B, omega_strict)")
-    print("  omega_A       : CBF(A_1, A_2), combined expected-information availability")
+    print("  omega_A       : ABF(A_1, A_2), aggregated expected-information availability")
     print("  omega_T       : trust_discount(omega_A, omega_C), current-track trustworthiness")
+    print("  omega_H       : omega_C * omega_A, tracking-system health")
 
 
 def main() -> None:
     print("=" * 88)
     print("SCRIPT BUILD: V7_TRACK_TRUST_CONDITIONAL_AVAILABILITY_2026-08-09")
-    print("TRACK TRUST PIPELINE: CONDITIONAL DISAGREEMENT + FINAL AVAILABILITY TRUST")
-    print("omega_B=WBF(C1_iso,C2_iso,C_F); omega_C=Deduction(G12; omega_B, omega_strict); omega_A=CBF(A1,A2); omega_T=omega_A(*)omega_C")
+    print("SELF-ASSESSMENT PIPELINE: TRACK TRUST + SYSTEM HEALTH")
+    print("omega_B=WBF(C1_iso,C2_iso,C_F); omega_C=Deduction(G12; omega_B, omega_strict); omega_A=ABF(A1,A2); omega_T=omega_A(*)omega_C; omega_H=omega_C*omega_A")
     if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
         print("V7 SYNCHRONOUS SPECIAL CASE: Sensor 1 = Sensor 2 = 10 Hz")
         if ENABLE_SENSOR_2_DROPOUT:
