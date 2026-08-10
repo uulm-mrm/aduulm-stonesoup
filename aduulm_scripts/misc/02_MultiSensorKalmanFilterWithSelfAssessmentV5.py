@@ -112,6 +112,8 @@ from typing import Iterable
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 import numpy as np
 from scipy.linalg import block_diag
 from scipy.stats import chi2, norm
@@ -266,6 +268,31 @@ GRIEBEL_ASYNC_EXTENSION_MODE = "active_only"
 # numerical components by reproducing the returned delta/u before ABF.  No
 # opinion is reconstructed from a hard decision and
 # no projected-probability comparison is used.
+
+# -----------------------------------------------------------------------------
+# EXPERIMENTAL Evaluation B (easy to disable/remove)
+# -----------------------------------------------------------------------------
+# One switch controls the complete provisional comparison block:
+#   "metrics"           -> Figure 5 = method-neutral detection/discrimination metrics
+#   "legacy_timeseries" -> restore the previous delta/d_norm + uncertainty overlay
+#   "off"               -> omit Evaluation B plotting entirely
+#
+# The metric mode does NOT change the runtime SA interfaces.  In particular,
+# omega_B and omega_C remain opinions; d_norm is extracted only as an offline
+# evaluation score.  Decision thresholds below are calibrated solely for the
+# offline comparison.
+EVALUATION_B_MODE = "metrics"  # "metrics" | "legacy_timeseries" | "off"
+EVALUATION_B_TARGET_NOMINAL_FPR = 0.05
+EVALUATION_B_MIN_PERSISTENCE_S = 0.20
+# Decision-level panel for the provisional single-run Evaluation B.
+# "event_detection" is recommended: one disturbance counts as detected when at
+# least one threshold crossing persists for EVALUATION_B_MIN_PERSISTENCE_S.
+# "sample_tpr" restores the previous sample-wise fraction-above-threshold view.
+EVALUATION_B_DECISION_METRIC = "event_detection"  # "event_detection" | "sample_tpr"
+# Sporadic outliers are intentionally excluded by default: the whole 10 s
+# interval is not continuously inconsistent because outliers occur only at
+# selected samples.  Set True if that interval should nevertheless be scored.
+EVALUATION_B_INCLUDE_SPORADIC_OUTLIERS = False
 
 # Output-level construction is hierarchical and separates inconsistency
 # evidence from missing-information uncertainty:
@@ -2976,7 +3003,7 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         )
     print(f"  Griebel reference: {griebel.status}")
     print(f"  Griebel async extension: {GRIEBEL_ASYNC_EXTENSION_MODE}")
-    print("  Griebel Evaluation B: validated native source opinions -> ABF -> DC/u vs omega_B and omega_C")
+    print("  Griebel Evaluation B: validated native source opinions -> ABF; optional offline metric comparison vs omega_B/omega_C")
 
     track = Track()
     event_timestamps: list[datetime] = []
@@ -3372,6 +3399,533 @@ def plot_opinion_pair(
     )
 
 
+# -----------------------------------------------------------------------------
+# BEGIN EXPERIMENTAL EVALUATION B METRICS
+# Everything in this block is offline evaluation only.  It can be removed
+# without changing filtering, TEFs, SL opinions, fusion, track trust or health.
+# -----------------------------------------------------------------------------
+
+
+def evaluation_b_disturbance_intervals() -> list[tuple[float, float, str]]:
+    """Return continuous consistency-violation intervals used in Evaluation B.
+
+    Dropout is deliberately excluded because availability is a separate
+    proposition in the proposed hierarchy.  Sporadic outliers are excluded by
+    default because labelling the complete outlier window as continuously
+    inconsistent would create misleading sample-wise ground-truth labels.
+    """
+    intervals: list[tuple[float, float, str]] = []
+
+    if ACTIVATE_DISTURBANCES and DISTURB_SENSOR_1:
+        if EVALUATION_B_INCLUDE_SPORADIC_OUTLIERS:
+            intervals.append((*OUTLIER_INTERVAL_S, "S1 outliers"))
+        intervals.extend([
+            (*SENSOR_1_BIAS_INTERVAL_S, "S1 bias"),
+            (*INCREASED_MEAS_XY_INTERVAL_S, "S1 R mismatch"),
+            (*VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, "S1 non-Gaussian"),
+        ])
+
+    # A turn is a model mismatch only for the CV filter.  For the CT filter the
+    # same interval is treated as nominal by is_nominal_time().
+    if ENABLE_GROUND_TRUTH_TURN and not USE_CT_MODEL:
+        intervals.append((*TURN_INTERVAL_S, "motion mismatch"))
+
+    if ACTIVATE_DISTURBANCES:
+        intervals.append((*INCREASED_PROCESS_XY_INTERVAL_S, "Q mismatch"))
+
+    return intervals
+
+
+def _evaluation_b_clean_series(times, scores) -> tuple[np.ndarray, np.ndarray]:
+    times = np.asarray(times, dtype=float).reshape(-1)
+    scores = np.asarray(scores, dtype=float).reshape(-1)
+    n = min(times.size, scores.size)
+    times = times[:n]
+    scores = scores[:n]
+    finite = np.isfinite(times) & np.isfinite(scores)
+    return times[finite], scores[finite]
+
+
+def _evaluation_b_method_series(result: ProcessingResult) -> dict[str, dict]:
+    """Return native continuous scores for the methods compared in Evaluation B."""
+    methods: dict[str, dict] = {}
+
+    if result.griebel.native and result.griebel.abf_times_s:
+        times, scores = _evaluation_b_clean_series(
+            result.griebel.abf_times_s,
+            result.griebel.abf_delta,
+        )
+        if scores.size:
+            methods["griebel"] = {
+                "label": "Griebel ABF",
+                "plot_label": r"Griebel ABF $\delta_G^{\mathrm{ABF}}$",
+                "colour": "black",
+                "times": times,
+                "scores": scores,
+            }
+
+    event_times = np.asarray(result.event_times_s, dtype=float)
+    for key, label, plot_label, colour, opinions in (
+        (
+            "omega_B",
+            "Proposed omega_B",
+            r"proposed $\omega_B$ (ablation)",
+            "tab:green",
+            result.track_base_history,
+        ),
+        (
+            "omega_C",
+            "Proposed omega_C",
+            r"proposed $\omega_C$",
+            "tab:blue",
+            result.track_consistency_history,
+        ),
+    ):
+        scores = [normalized_disbelief(opinion) for opinion in opinions]
+        times, scores = _evaluation_b_clean_series(event_times, scores)
+        if scores.size:
+            methods[key] = {
+                "label": label,
+                "plot_label": plot_label,
+                "colour": colour,
+                "times": times,
+                "scores": scores,
+            }
+
+    return methods
+
+
+def _evaluation_b_auroc(positive: np.ndarray, negative: np.ndarray) -> float:
+    """AUROC from pairwise ranking, including half credit for ties."""
+    positive = np.asarray(positive, dtype=float)
+    negative = np.asarray(negative, dtype=float)
+    if positive.size == 0 or negative.size == 0:
+        return float("nan")
+    difference = positive[:, None] - negative[None, :]
+    return float(
+        np.mean(difference > 0.0) + 0.5 * np.mean(difference == 0.0)
+    )
+
+
+def _evaluation_b_average_precision(
+    positive: np.ndarray,
+    negative: np.ndarray,
+) -> float:
+    """Average precision (area under the step-wise precision-recall curve)."""
+    positive = np.asarray(positive, dtype=float)
+    negative = np.asarray(negative, dtype=float)
+    if positive.size == 0 or negative.size == 0:
+        return float("nan")
+
+    scores = np.concatenate([positive, negative])
+    labels = np.concatenate([
+        np.ones(positive.size, dtype=int),
+        np.zeros(negative.size, dtype=int),
+    ])
+    order = np.argsort(-scores, kind="mergesort")
+    scores = scores[order]
+    labels = labels[order]
+
+    tp_cumulative = np.cumsum(labels)
+    fp_cumulative = np.cumsum(1 - labels)
+    # Evaluate only after complete equal-score groups so tie order cannot bias AP.
+    group_ends = np.r_[np.where(np.diff(scores) != 0.0)[0], scores.size - 1]
+    tp = tp_cumulative[group_ends].astype(float)
+    fp = fp_cumulative[group_ends].astype(float)
+    precision = tp / np.maximum(tp + fp, 1.0)
+    recall = tp / float(positive.size)
+    recall_increment = np.diff(np.r_[0.0, recall])
+    return float(np.sum(recall_increment * precision))
+
+
+def _evaluation_b_threshold_for_target_fpr(
+    nominal_scores: np.ndarray,
+    target_fpr: float,
+) -> tuple[float, float]:
+    """Choose an offline score threshold whose nominal FPR is closest to target."""
+    nominal_scores = np.asarray(nominal_scores, dtype=float)
+    nominal_scores = nominal_scores[np.isfinite(nominal_scores)]
+    if nominal_scores.size == 0:
+        return float("nan"), float("nan")
+
+    target_fpr = float(np.clip(target_fpr, 0.0, 1.0))
+    unique_scores = np.unique(nominal_scores)
+    candidates = np.r_[
+        np.nextafter(unique_scores[0], -np.inf),
+        unique_scores,
+        np.nextafter(unique_scores[-1], np.inf),
+    ]
+    fprs = np.asarray([
+        np.mean(nominal_scores > threshold)
+        for threshold in candidates
+    ])
+    absolute_error = np.abs(fprs - target_fpr)
+    best_error = np.nanmin(absolute_error)
+    best_indices = np.flatnonzero(np.isclose(absolute_error, best_error))
+
+    # If two discrete operating points are equally close, prefer the one that
+    # does not exceed the requested false-alarm rate.
+    conservative = [
+        index for index in best_indices if fprs[index] <= target_fpr + 1e-12
+    ]
+    best_index = conservative[0] if conservative else int(best_indices[0])
+    return float(candidates[best_index]), float(fprs[best_index])
+
+
+def _evaluation_b_detection_delay(
+    times: np.ndarray,
+    scores: np.ndarray,
+    interval: tuple[float, float],
+    threshold: float,
+    persistence_s: float,
+) -> float:
+    """First persistent threshold crossing after disturbance onset."""
+    start_s, end_s = interval
+    mask = (times >= start_s) & (times < end_s)
+    local_times = np.asarray(times[mask], dtype=float)
+    local_scores = np.asarray(scores[mask], dtype=float)
+    if local_times.size == 0 or not np.isfinite(threshold):
+        return float("nan")
+
+    candidate_start: float | None = None
+    for time_s, score in zip(local_times, local_scores):
+        if score > threshold:
+            if candidate_start is None:
+                candidate_start = float(time_s)
+            if float(time_s) - candidate_start >= persistence_s - 1e-12:
+                return max(0.0, candidate_start - start_s)
+        else:
+            candidate_start = None
+    return float("nan")
+
+
+def compute_evaluation_b_metrics(result: ProcessingResult) -> dict:
+    """Compute single-run, method-neutral Evaluation-B metrics.
+
+    The score scales remain native to each method:
+      Griebel -> delta_G^ABF
+      proposed -> d_norm(omega_B), d_norm(omega_C)
+
+    AUROC/AP compare ranking only.  For decision-level TPR and detection delay,
+    each method receives an offline threshold calibrated on its own clean nominal
+    samples to the same requested nominal false-positive rate.  These thresholds
+    are evaluation devices, not part of the proposed runtime interface.
+    """
+    intervals = evaluation_b_disturbance_intervals()
+    methods = _evaluation_b_method_series(result)
+
+    for method in methods.values():
+        times = method["times"]
+        scores = method["scores"]
+        nominal_mask = np.asarray(
+            [is_nominal_time(float(time_s)) for time_s in times],
+            dtype=bool,
+        )
+        nominal_scores = scores[nominal_mask]
+        threshold, achieved_fpr = _evaluation_b_threshold_for_target_fpr(
+            nominal_scores,
+            EVALUATION_B_TARGET_NOMINAL_FPR,
+        )
+        method["threshold"] = threshold
+        method["nominal_fpr"] = achieved_fpr
+        method["nominal_count"] = int(nominal_scores.size)
+        method["interval_metrics"] = []
+
+        for start_s, end_s, interval_label in intervals:
+            positive_mask = (times >= start_s) & (times < end_s)
+            positive_scores = scores[positive_mask]
+            auroc = _evaluation_b_auroc(positive_scores, nominal_scores)
+            average_precision = _evaluation_b_average_precision(
+                positive_scores,
+                nominal_scores,
+            )
+            tpr = (
+                float(np.mean(positive_scores > threshold))
+                if positive_scores.size and np.isfinite(threshold)
+                else float("nan")
+            )
+            delay = _evaluation_b_detection_delay(
+                times,
+                scores,
+                (start_s, end_s),
+                threshold,
+                EVALUATION_B_MIN_PERSISTENCE_S,
+            )
+            event_detected = float(np.isfinite(delay))
+            method["interval_metrics"].append({
+                "label": interval_label,
+                "start": float(start_s),
+                "end": float(end_s),
+                "positive_count": int(positive_scores.size),
+                "auroc": auroc,
+                "average_precision": average_precision,
+                # Retain the previous sample-wise TPR as a diagnostic.  It is
+                # not the recommended headline metric for a finite-duration
+                # temporal monitor because onset/recovery transients strongly
+                # depress the fraction of disturbed samples above threshold.
+                "tpr": tpr,
+                # Recommended event-level decision metric: did this disturbance
+                # produce at least one persistent threshold crossing?
+                "event_detected": event_detected,
+                "detection_delay_s": delay,
+            })
+
+    return {"intervals": intervals, "methods": methods}
+
+
+def plot_evaluation_b_metrics(result: ProcessingResult) -> None:
+    """Plot provisional Figure 5 as method-neutral performance metrics.
+
+    The middle panel is intentionally configurable.  ``event_detection`` is the
+    recommended single-run view: a disturbance is detected if the offline
+    matched-FPR threshold is exceeded persistently at least once.  In a future
+    Monte-Carlo evaluation, the mean of this 0/1 quantity becomes the empirical
+    event detection probability.  ``sample_tpr`` restores the older fraction of
+    all disturbance samples above threshold.
+    """
+    evaluation = compute_evaluation_b_metrics(result)
+    methods = evaluation["methods"]
+    intervals = evaluation["intervals"]
+
+    if not intervals:
+        return
+
+    decision_metric = EVALUATION_B_DECISION_METRIC.lower()
+    if decision_metric not in {"event_detection", "sample_tpr"}:
+        raise ValueError(
+            "EVALUATION_B_DECISION_METRIC must be 'event_detection' or "
+            f"'sample_tpr', got {EVALUATION_B_DECISION_METRIC!r}"
+        )
+
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    x = np.arange(len(intervals), dtype=float)
+    method_items = list(methods.items())
+    if not method_items:
+        axes[0].text(
+            0.5,
+            0.5,
+            "No Evaluation-B score series available",
+            transform=axes[0].transAxes,
+            ha="center",
+            va="center",
+        )
+        return
+
+    total_width = 0.78
+    bar_width = total_width / len(method_items)
+    offsets = (
+        np.arange(len(method_items), dtype=float) - (len(method_items) - 1) / 2.0
+    ) * bar_width
+
+    max_detected_delay = 0.0
+    any_non_detection = False
+    method_handles = [
+        Patch(facecolor=method["colour"], alpha=0.82, label=method["plot_label"])
+        for _, method in method_items
+    ]
+
+    for method_index, (_, method) in enumerate(method_items):
+        metrics = method["interval_metrics"]
+        positions = x + offsets[method_index]
+        auroc = np.asarray([entry["auroc"] for entry in metrics], dtype=float)
+        tpr = np.asarray([entry["tpr"] for entry in metrics], dtype=float)
+        event_detected = np.asarray(
+            [entry["event_detected"] for entry in metrics], dtype=float
+        )
+        delay = np.asarray(
+            [entry["detection_delay_s"] for entry in metrics], dtype=float
+        )
+
+        axes[0].bar(
+            positions,
+            auroc,
+            width=bar_width * 0.92,
+            color=method["colour"],
+            alpha=0.82,
+        )
+
+        middle_values = event_detected if decision_metric == "event_detection" else tpr
+        axes[1].bar(
+            positions,
+            middle_values,
+            width=bar_width * 0.92,
+            color=method["colour"],
+            alpha=0.82,
+        )
+
+        finite_delay = np.isfinite(delay)
+        any_non_detection = any_non_detection or np.any(~finite_delay)
+        if np.any(finite_delay):
+            max_detected_delay = max(
+                max_detected_delay,
+                float(np.nanmax(delay[finite_delay])),
+            )
+            axes[2].bar(
+                positions[finite_delay],
+                delay[finite_delay],
+                width=bar_width * 0.92,
+                color=method["colour"],
+                alpha=0.82,
+            )
+
+        # No pseudo-delay bar for a non-detection.  Store its x position and
+        # mark it explicitly after the y scale is known.
+        method["_nd_positions"] = positions[~finite_delay]
+
+    axes[0].axhline(0.5, color="0.5", linestyle=":", linewidth=1.0)
+    axes[0].set_ylabel("AUROC")
+    axes[0].set_ylim(0.0, 1.02)
+    axes[0].set_title(
+        "Threshold-independent discrimination: disturbance interval vs nominal operation"
+    )
+
+    axes[1].set_ylim(0.0, 1.02)
+    if decision_metric == "event_detection":
+        axes[1].set_ylabel("event detected")
+        axes[1].set_yticks([0.0, 1.0])
+        axes[1].set_yticklabels(["no", "yes"])
+        axes[1].set_title(
+            rf"Persistent event detection at matched nominal FPR ≈ "
+            rf"{100.0 * EVALUATION_B_TARGET_NOMINAL_FPR:.0f}\% "
+            rf"($\geq$ {EVALUATION_B_MIN_PERSISTENCE_S:g} s; single run)"
+        )
+    else:
+        axes[1].set_ylabel("sample-wise TPR")
+        axes[1].set_title(
+            rf"Sample-wise detection rate at matched nominal FPR ≈ "
+            rf"{100.0 * EVALUATION_B_TARGET_NOMINAL_FPR:.0f}\%"
+        )
+
+    delay_marker_y = max(max_detected_delay * 1.08, 0.6)
+    delay_top = max(delay_marker_y * 1.14, 1.0)
+    for _, method in method_items:
+        nd_positions = method.get("_nd_positions", np.asarray([], dtype=float))
+        if nd_positions.size:
+            axes[2].scatter(
+                nd_positions,
+                np.full(nd_positions.shape, delay_marker_y),
+                marker="x",
+                s=70,
+                linewidths=1.8,
+                color=method["colour"],
+                zorder=4,
+            )
+            for x_pos in nd_positions:
+                axes[2].text(
+                    float(x_pos),
+                    delay_marker_y + 0.02 * delay_top,
+                    "ND",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    rotation=90,
+                )
+
+    axes[2].set_ylabel("detection delay [s]")
+    axes[2].set_ylim(0.0, delay_top)
+    axes[2].set_title(
+        rf"First persistent detection ($\geq$ {EVALUATION_B_MIN_PERSISTENCE_S:g} s); "
+        "× ND = no persistent detection in interval"
+    )
+    axes[2].set_xlabel("disturbance")
+
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(
+        [label for _, _, label in intervals],
+        rotation=20,
+        ha="right",
+    )
+
+    axes[0].legend(handles=method_handles, loc="best", fontsize=9)
+    decision_handles = [
+        Patch(
+            facecolor=method["colour"],
+            alpha=0.82,
+            label=(
+                method["plot_label"]
+                + rf" (nominal FPR={100.0 * method['nominal_fpr']:.1f}\%)"
+            ),
+        )
+        for _, method in method_items
+    ]
+    axes[1].legend(handles=decision_handles, loc="best", fontsize=9)
+    delay_handles = method_handles.copy()
+    if any_non_detection:
+        delay_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="x",
+                linestyle="None",
+                color="0.15",
+                markersize=7,
+                markeredgewidth=1.8,
+                label="ND: no persistent detection",
+            )
+        )
+    axes[2].legend(handles=delay_handles, loc="best", fontsize=9)
+
+    for axis in axes:
+        axis.grid(True, axis="y", alpha=0.35)
+
+    if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+        source_note = "synchronous 10 Hz comparison"
+    else:
+        source_note = (
+            f"Griebel async extension={GRIEBEL_ASYNC_EXTENSION_MODE!r}"
+        )
+
+    fig.suptitle(
+        "Evaluation B — overall consistency detection performance (single run)\n"
+        + r"Griebel ABF $\delta_G^{ABF}$ vs. proposed $d_{norm}(\omega_B)$ and "
+        + r"$d_{norm}(\omega_C)$; offline thresholds only for decision-level metrics"
+        + "\n"
+        + source_note
+    )
+    fig.tight_layout()
+
+
+def print_evaluation_b_metrics(result: ProcessingResult) -> None:
+    """Print the same provisional metrics, including AUPRC, as a compact table."""
+    if EVALUATION_B_MODE != "metrics":
+        return
+    evaluation = compute_evaluation_b_metrics(result)
+    methods = evaluation["methods"]
+    intervals = evaluation["intervals"]
+    if not methods or not intervals:
+        return
+
+    print("\nEvaluation B — provisional single-run detection metrics")
+    print(f"  decision panel: {EVALUATION_B_DECISION_METRIC} (sample-wise TPR retained as diagnostic)")
+    print(
+        "  runtime interfaces unchanged; thresholds below are offline-only; "
+        f"target nominal FPR={100.0 * EVALUATION_B_TARGET_NOMINAL_FPR:.1f}%"
+    )
+    for method in methods.values():
+        print(
+            f"  {method['label']}: threshold={method['threshold']:.4f}, "
+            f"achieved nominal FPR={100.0 * method['nominal_fpr']:.2f}% "
+            f"(n={method['nominal_count']})"
+        )
+        for entry in method["interval_metrics"]:
+            delay_text = (
+                f"{entry['detection_delay_s']:.2f}s"
+                if np.isfinite(entry["detection_delay_s"])
+                else "ND"
+            )
+            print(
+                f"    {entry['label']:<18s} "
+                f"AUROC={entry['auroc']:.3f}, "
+                f"AUPRC={entry['average_precision']:.3f}, "
+                f"TPR={entry['tpr']:.3f}, delay={delay_text}"
+            )
+
+
+# -----------------------------------------------------------------------------
+# END EXPERIMENTAL EVALUATION B METRICS
+# -----------------------------------------------------------------------------
+
+
 def plot_static_results(result: ProcessingResult) -> None:
     event_times = np.asarray(result.event_times_s, dtype=float)
     sensor_ids = sorted(result.isolated_states)
@@ -3612,127 +4166,143 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Figure 5 / Evaluation B: overall consistency assessment.
+    # Figure 5 / Evaluation B.  Controlled by the single EVALUATION_B_MODE
+    # switch near the top of the script so this provisional analysis can be
+    # restored or removed without touching the runtime SA pipeline.
     # ------------------------------------------------------------------
-    #
-    # Griebel: native pre-threshold single-sensor SA opinions are fused with
-    # Average Belief Fusion (ABF), then evaluated against Griebel's native
-    # dogmatic Gaussian reference using Degree of Conflict (DC).
-    #
-    # Proposed approach:
-    #   omega_B = WBF(C_1^iso, C_2^iso, C_F)
-    #   omega_C = Deduction(G_12; omega_B, omega_strict)
-    #
-    # The first panel deliberately calls the y-axis "method-specific
-    # inconsistency score": Griebel's delta_ABF and our d_norm are both bounded
-    # [0,1] inconsistency indicators, but they are not mathematically identical
-    # quantities.  The second panel compares their SL uncertainty directly.
-    #
-    fig, axes = plt.subplots(2, 1, figsize=(15, 7), sharex=True)
+    if EVALUATION_B_MODE == "metrics":
+        plot_evaluation_b_metrics(result)
+    elif EVALUATION_B_MODE == "legacy_timeseries":
+        # ------------------------------------------------------------------
+        # Figure 5 / Evaluation B: overall consistency assessment.
+        # ------------------------------------------------------------------
+        #
+        # Griebel: native pre-threshold single-sensor SA opinions are fused with
+        # Average Belief Fusion (ABF), then evaluated against Griebel's native
+        # dogmatic Gaussian reference using Degree of Conflict (DC).
+        #
+        # Proposed approach:
+        #   omega_B = WBF(C_1^iso, C_2^iso, C_F)
+        #   omega_C = Deduction(G_12; omega_B, omega_strict)
+        #
+        # The first panel deliberately calls the y-axis "method-specific
+        # inconsistency score": Griebel's delta_ABF and our d_norm are both bounded
+        # [0,1] inconsistency indicators, but they are not mathematically identical
+        # quantities.  The second panel compares their SL uncertainty directly.
+        #
+        fig, axes = plt.subplots(2, 1, figsize=(15, 7), sharex=True)
 
-    if result.griebel.native and result.griebel.abf_times_s:
+        if result.griebel.native and result.griebel.abf_times_s:
+            axes[0].plot(
+                result.griebel.abf_times_s,
+                result.griebel.abf_delta,
+                color="black",
+                linestyle="--",
+                linewidth=1.7,
+                label=(
+                    r"Griebel native ABF: "
+                    r"$\delta_G^{\mathrm{ABF}}="
+                    r"\mathrm{DC}(\omega_G^{\mathrm{ABF}},\omega_G^{ref})$"
+                ),
+            )
+            axes[1].plot(
+                result.griebel.abf_times_s,
+                result.griebel.abf_uncertainty,
+                color="black",
+                linestyle="--",
+                linewidth=1.7,
+                label=r"Griebel native ABF: $u_G^{\mathrm{ABF}}$",
+            )
+        else:
+            axes[0].text(
+                0.5,
+                0.92,
+                "Native Griebel ABF unavailable",
+                transform=axes[0].transAxes,
+                ha="center",
+                va="top",
+                color="black",
+            )
+
         axes[0].plot(
-            result.griebel.abf_times_s,
-            result.griebel.abf_delta,
-            color="black",
-            linestyle="--",
-            linewidth=1.7,
+            event_times,
+            [normalized_disbelief(op) for op in result.track_base_history],
+            color="tab:green",
+            linewidth=1.6,
             label=(
-                r"Griebel native ABF: "
-                r"$\delta_G^{\mathrm{ABF}}="
-                r"\mathrm{DC}(\omega_G^{\mathrm{ABF}},\omega_G^{ref})$"
+                r"proposed base "
+                r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$: "
+                r"$d_{\mathrm{norm}}$"
             ),
         )
+        axes[0].plot(
+            event_times,
+            [normalized_disbelief(op) for op in result.track_consistency_history],
+            color="tab:blue",
+            linewidth=1.8,
+            label=(
+                r"proposed pair-conditioned "
+                r"$\omega_C=\mathrm{Deduction}(G_{12};"
+                r"\omega_B,\omega_{\mathrm{strict}})$: "
+                r"$d_{\mathrm{norm}}$"
+            ),
+        )
+
         axes[1].plot(
-            result.griebel.abf_times_s,
-            result.griebel.abf_uncertainty,
-            color="black",
-            linestyle="--",
-            linewidth=1.7,
-            label=r"Griebel native ABF: $u_G^{\mathrm{ABF}}$",
+            event_times,
+            [uncertainty(op) for op in result.track_base_history],
+            color="tab:green",
+            linewidth=1.6,
+            label=r"proposed base $\omega_B$: $u_B$",
         )
+        axes[1].plot(
+            event_times,
+            [uncertainty(op) for op in result.track_consistency_history],
+            color="tab:blue",
+            linewidth=1.8,
+            label=r"proposed pair-conditioned $\omega_C$: $u_C$",
+        )
+
+        axes[0].set_title(
+            "Inconsistency response — method-specific normalized scores"
+        )
+        axes[1].set_title("Opinion uncertainty")
+        axes[0].set_ylabel("inconsistency score")
+        axes[1].set_ylabel("uncertainty")
+        axes[1].set_xlabel("time [s]")
+
+        for axis in axes:
+            axis.grid(True)
+            axis.legend(loc="upper right")
+            add_disturbance_spans(axis)
+            axis.set_ylim(-0.02, 1.02)
+
+        if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
+            comparison_subtitle = (
+                "synchronous source set: all configured sensor SA opinions"
+            )
+        else:
+            comparison_subtitle = (
+                f"Griebel asynchronous source selection = "
+                f"{GRIEBEL_ASYNC_EXTENSION_MODE!r}; "
+                "explicit extension of the synchronous multi-source setting"
+            )
+
+        fig.suptitle(
+            "Evaluation B — overall consistency assessment\n"
+            r"Griebel native ABF vs proposed $\omega_B$ and $\omega_C$"
+            "\n"
+            + comparison_subtitle
+        )
+        fig.tight_layout()
+
+    elif EVALUATION_B_MODE == "off":
+        pass
     else:
-        axes[0].text(
-            0.5,
-            0.92,
-            "Native Griebel ABF unavailable",
-            transform=axes[0].transAxes,
-            ha="center",
-            va="top",
-            color="black",
+        raise ValueError(
+            "EVALUATION_B_MODE must be 'metrics', 'legacy_timeseries', or 'off', "
+            f"got {EVALUATION_B_MODE!r}"
         )
-
-    axes[0].plot(
-        event_times,
-        [normalized_disbelief(op) for op in result.track_base_history],
-        color="tab:green",
-        linewidth=1.6,
-        label=(
-            r"proposed base "
-            r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$: "
-            r"$d_{\mathrm{norm}}$"
-        ),
-    )
-    axes[0].plot(
-        event_times,
-        [normalized_disbelief(op) for op in result.track_consistency_history],
-        color="tab:blue",
-        linewidth=1.8,
-        label=(
-            r"proposed pair-conditioned "
-            r"$\omega_C=\mathrm{Deduction}(G_{12};"
-            r"\omega_B,\omega_{\mathrm{strict}})$: "
-            r"$d_{\mathrm{norm}}$"
-        ),
-    )
-
-    axes[1].plot(
-        event_times,
-        [uncertainty(op) for op in result.track_base_history],
-        color="tab:green",
-        linewidth=1.6,
-        label=r"proposed base $\omega_B$: $u_B$",
-    )
-    axes[1].plot(
-        event_times,
-        [uncertainty(op) for op in result.track_consistency_history],
-        color="tab:blue",
-        linewidth=1.8,
-        label=r"proposed pair-conditioned $\omega_C$: $u_C$",
-    )
-
-    axes[0].set_title(
-        "Inconsistency response — method-specific normalized scores"
-    )
-    axes[1].set_title("Opinion uncertainty")
-    axes[0].set_ylabel("inconsistency score")
-    axes[1].set_ylabel("uncertainty")
-    axes[1].set_xlabel("time [s]")
-
-    for axis in axes:
-        axis.grid(True)
-        axis.legend(loc="upper right")
-        add_disturbance_spans(axis)
-        axis.set_ylim(-0.02, 1.02)
-
-    if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
-        comparison_subtitle = (
-            "synchronous source set: all configured sensor SA opinions"
-        )
-    else:
-        comparison_subtitle = (
-            f"Griebel asynchronous source selection = "
-            f"{GRIEBEL_ASYNC_EXTENSION_MODE!r}; "
-            "explicit extension of the synchronous multi-source setting"
-        )
-
-    fig.suptitle(
-        "Evaluation B — overall consistency assessment\n"
-        r"Griebel native ABF vs proposed $\omega_B$ and $\omega_C$"
-        "\n"
-        + comparison_subtitle
-    )
-    fig.tight_layout()
 
     # ------------------------------------------------------------------
     # Native Griebel local outputs retained for the source-isolation /
@@ -4668,8 +5238,8 @@ def print_summary(result: ProcessingResult) -> None:
     print(f"  backend: {result.griebel.status}")
     print(f"  async extension mode: {GRIEBEL_ASYNC_EXTENSION_MODE}")
     print(
-        "  Evaluation B: native pre-threshold Griebel opinions -> ABF -> "
-        "DC/uncertainty vs proposed omega_B and omega_C"
+        "  Evaluation B: native pre-threshold Griebel opinions -> ABF; "
+        f"plot mode={EVALUATION_B_MODE!r}"
     )
     if result.griebel.native:
         print(
@@ -4751,6 +5321,8 @@ def print_summary(result: ProcessingResult) -> None:
             "  mean track-output uncertainty during dropout: "
             f"{interval_mean(result.event_times_s, [uncertainty(op) for op in result.track_output_trust_history], SENSOR_2_DROPOUT_INTERVAL_S):.3f}"
         )
+
+    print_evaluation_b_metrics(result)
 
     print("\nInterpretation reminder")
     print("  d_norm=d/(1-u): normalized inconsistency within committed evidence")

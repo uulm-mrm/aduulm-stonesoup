@@ -12,7 +12,8 @@ Changes relative to the former Monte-Carlo script:
   - the former truncated-Gaussian disturbance in k in [700, 800) is replaced
     by the variance-matched heavy-tailed Gaussian mixture used in 02_...V5,
   - normalized disbelief d_norm = d/(1-u) is exported and used as the primary
-    binomial-assessment plot quantity instead of projected probability P_OK.
+    binomial-assessment plot quantity instead of projected probability P_OK,
+  - normalized belief b_norm = b/(1-u) is exported alongside d_norm.
 
 Outputs:
   - compressed NumPy archive with all runs and aggregate statistics
@@ -128,7 +129,7 @@ class ExperimentConfig:
     non_gaussian_end: int = 800
     use_heavy_tailed_non_gaussian: bool = True
     heavy_tail_core_probability: float = 0.90
-    heavy_tail_core_std: float = 0.20
+    heavy_tail_core_std: float = 0.50  # 0.20
 
     # Optional legacy stress-test intervals, disabled by default.
     correlated_start: int = -1
@@ -148,10 +149,10 @@ class ExperimentConfig:
     # Self-assessment
     W: int = 7
     short_window_size: int = 35
-    discount: float = 0.999  # proposed LTST, as in 01_...V7
+    discount: float = 0.99
     alpha_threshold_dc: float = 0.01
-    handle_st_conflict: bool = True
-    avg_dc_conflict_handling: bool = True
+    handle_st_conflict: bool = False
+    avg_dc_conflict_handling: bool = False
     griebel_alpha: float = 0.05
     griebel_window_length: int = 35
     griebel_two_sided: bool = True
@@ -162,7 +163,7 @@ class ExperimentConfig:
     # Output
     output_dir: str = "mc_results"
     output_prefix: str = "mc_kalman_sa"
-    save_plot: bool = False
+    save_plot: bool = True
     show_plot: bool = True
     show_quantile_band: bool = True
     save_uncertainty_plots: bool = False
@@ -355,6 +356,25 @@ def normalized_disbelief_from_components(
 def normalized_disbelief(opinion) -> float:
     return normalized_disbelief_from_components(
         float(opinion.disbelief()),
+        float(opinion.uncertainty()),
+    )
+
+
+def normalized_belief_from_components(
+    belief_value: float,
+    uncertainty_value: float,
+    eps: float = 1e-12,
+) -> float:
+    """Return b_norm=b/(1-u), i.e. consistency within committed evidence."""
+    committed_mass = 1.0 - float(uncertainty_value)
+    if committed_mass <= eps:
+        return float("nan")
+    return float(np.clip(float(belief_value) / committed_mass, 0.0, 1.0))
+
+
+def normalized_belief(opinion) -> float:
+    return normalized_belief_from_components(
+        float(opinion.belief()),
         float(opinion.uncertainty()),
     )
 
@@ -693,6 +713,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
     )
     griebel_inno_window = []
     griebel_p_ok_history = []
+    griebel_b_norm_history = []
     griebel_d_norm_history = []
     griebel_uncertainty_history = []
 
@@ -764,6 +785,7 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
             griebel_inno_window.pop(0)
         griebel_fused = sl.Fusion.fuse_opinions(sl.FusionType.CUMULATIVE, griebel_inno_window)
         griebel_p_ok_history.append(griebel_fused.getProjection()[0])
+        griebel_b_norm_history.append(normalized_belief(griebel_fused))
         griebel_d_norm_history.append(normalized_disbelief(griebel_fused))
         griebel_uncertainty_history.append(griebel_fused.uncertainty())
 
@@ -846,6 +868,11 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
     p_ok_comp = []
     p_ok_overall = []
     p_ok_radial = []
+    b_norm_x = []
+    b_norm_y = []
+    b_norm_comp = []
+    b_norm_overall = []
+    b_norm_radial = []
     d_norm_x = []
     d_norm_y = []
     d_norm_comp = []
@@ -868,6 +895,11 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         p_ok_comp.append(component_op.getProjection()[0])
         p_ok_overall.append(overall_op.getProjection()[0])
         p_ok_radial.append(opr.getProjection()[0])
+        b_norm_x.append(normalized_belief(opx_bin))
+        b_norm_y.append(normalized_belief(opy_bin))
+        b_norm_comp.append(normalized_belief(component_op))
+        b_norm_overall.append(normalized_belief(overall_op))
+        b_norm_radial.append(normalized_belief(opr))
         d_norm_x.append(normalized_disbelief(opx_bin))
         d_norm_y.append(normalized_disbelief(opy_bin))
         d_norm_comp.append(normalized_disbelief(component_op))
@@ -894,6 +926,12 @@ def run_single_simulation(seed: int, config: ExperimentConfig) -> Dict[str, np.n
         "p_ok_y": np.asarray(p_ok_y, dtype=float),
         "p_ok_comp": np.asarray(p_ok_comp, dtype=float),
         "p_ok_overall": np.asarray(p_ok_overall, dtype=float),
+        "b_norm_griebel_innovation": np.asarray(griebel_b_norm_history, dtype=float),
+        "b_norm_radial": np.asarray(b_norm_radial, dtype=float),
+        "b_norm_x": np.asarray(b_norm_x, dtype=float),
+        "b_norm_y": np.asarray(b_norm_y, dtype=float),
+        "b_norm_comp": np.asarray(b_norm_comp, dtype=float),
+        "b_norm_overall": np.asarray(b_norm_overall, dtype=float),
         "d_norm_griebel_innovation": np.asarray(griebel_d_norm_history, dtype=float),
         "d_norm_radial": np.asarray(d_norm_radial, dtype=float),
         "d_norm_x": np.asarray(d_norm_x, dtype=float),
@@ -972,6 +1010,12 @@ def save_mc_results(mc_results: Dict[str, Dict[str, np.ndarray]], config: Experi
     # CSV with mean and quantile series for the exported core time series
     csv_path = out_dir / f"{config.output_prefix}_time_series.csv"
     core_keys = [
+        "b_norm_griebel_innovation",
+        "b_norm_radial",
+        "b_norm_x",
+        "b_norm_y",
+        "b_norm_comp",
+        "b_norm_overall",
         "d_norm_griebel_innovation",
         "d_norm_radial",
         "d_norm_x",
@@ -1178,7 +1222,7 @@ def main() -> None:
         overlay_uncertainty_in_dnorm_plots=args.overlay_uncertainty,
         use_forced_half_innovation=args.forced_half_innovation,
     )
-
+    print("Will be saved to:", config.output_dir)
     mc_results = run_monte_carlo(config)
     paths = save_mc_results(mc_results, config)
     print("Saved results:")

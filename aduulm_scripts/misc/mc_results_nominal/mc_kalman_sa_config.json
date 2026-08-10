@@ -27,13 +27,15 @@
   "meas_disturb_k6": 200,
   "disturb_noise_coeff_x": 1,
   "disturb_noise_coeff_y": 1,
+  "non_gaussian_start": 700,
+  "non_gaussian_end": 800,
+  "use_heavy_tailed_non_gaussian": true,
+  "heavy_tail_core_probability": 0.9,
+  "heavy_tail_core_std": 0.5,
   "correlated_start": -1,
   "correlated_end": -1,
   "diagonal_start": -1,
   "diagonal_end": -1,
-  "truncated_start": 700,
-  "truncated_end": 800,
-  "truncation_sigma": 1.0,
   "use_forced_half_innovation": false,
   "forced_half_start": 1000,
   "forced_half_end": 1100,
@@ -44,10 +46,13 @@
   "short_window_size": 35,
   "discount": 0.99,
   "alpha_threshold_dc": 0.01,
+  "handle_st_conflict": false,
+  "avg_dc_conflict_handling": false,
   "griebel_alpha": 0.05,
   "griebel_window_length": 35,
   "griebel_two_sided": true,
   "griebel_type_compar": "dimensional",
+  "griebel_trust_discount": 0.99,
   "griebel_priors": [
     0.95,
     0.05
@@ -55,8 +60,8 @@
   "output_dir": "mc_results_nominal",
   "output_prefix": "mc_kalman_sa",
   "save_plot": true,
-  "show_plot": false,
+  "show_plot": true,
   "show_quantile_band": true,
   "save_uncertainty_plots": true,
-  "overlay_uncertainty_in_pok_plots": false
+  "overlay_uncertainty_in_dnorm_plots": false
 }

@@ -5,6 +5,7 @@ Reduce a Monte-Carlo time-series CSV for use with LaTeX/PGFPlots.
 Default behaviour:
 - keeps the time/index column "k"
 - keeps all aggregate mean columns ending in "_mean"
+  (including b_norm_*_mean and d_norm_*_mean)
 - removes q05/q50/q95 and other auxiliary columns
 - keeps ALL time steps (no temporal downsampling)
 - optionally shortens floating-point text representation
@@ -21,7 +22,9 @@ Examples:
 
     # Keep selected columns only:
     python reduce_csv_for_overleaf.py mc_kalman_sa_time_series.csv \
-        --columns k d_norm_radial_mean d_norm_x_mean d_norm_y_mean d_norm_overall_mean
+        --columns k \
+        b_norm_radial_mean b_norm_x_mean b_norm_y_mean b_norm_overall_mean \
+        d_norm_radial_mean d_norm_x_mean d_norm_y_mean d_norm_overall_mean
 
     # Custom output name:
     python reduce_csv_for_overleaf.py mc_kalman_sa_time_series.csv \
@@ -82,6 +85,8 @@ def choose_columns(
         # Fall back to the first column so PGFPlots still has an x-axis candidate.
         index_columns = [fieldnames[0]]
 
+    # b_norm_*_mean and d_norm_*_mean are intentionally included here:
+    # the default reduced file retains every Monte-Carlo mean time series.
     mean_columns = [
         name
         for name in fieldnames
