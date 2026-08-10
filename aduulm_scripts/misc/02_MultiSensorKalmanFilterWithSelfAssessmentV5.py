@@ -66,13 +66,14 @@ separating the assessment into semantically distinct opinions:
      the filter's primary state uncertainty and omega_T is secondary online
      trustworthiness / self-assessment.
 
-9. Optional Griebel 2023 reference and comparison layer
+9. Griebel reference and overall-consistency comparison (Evaluation B)
    - native single-sensor SA is evaluated against the common central prediction,
-   - the currently available API exposes DC, uncertainty and threshold, not the
-     complete internal source opinions of the published multi-source fusion,
-   - therefore no pseudo-native Griebel ABF opinion is reconstructed,
-   - the optional threshold-decision aggregate remains explicitly labelled as a
-     constructed decision-level diagnostic only.
+   - the current pre-threshold multinomial SA opinion is read directly from
+     KalmanSelfAssessor._op_st and validated against native (DC, uncertainty),
+   - the selected native source opinions are fused with Average Belief Fusion:
+         omega_G^ABF = ABF(omega_G,1, omega_G,2),
+   - Figure 5 compares Griebel's native-ABF DC/uncertainty with the proposed
+     omega_B and omega_C paths; no threshold-decision pseudo-opinion is used.
 
 Temporal parametrisation
 ------------------------
@@ -81,7 +82,7 @@ using the corresponding assessment-event rate:
 
     local/common sensor consistency horizon = 5.0 s
     direct central-batch horizon            = 5.0 s
-    availability horizon                    = 5.0 s
+    availability horizon                    = 1.0 s
     sensor-pair disagreement horizon        = 5.0 s
 
 Thus n_ST ~= T * f for the event stream feeding the respective TEF. The
@@ -161,7 +162,7 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 
 # False: asynchronous/multi-rate case.
 # True: limiting case; both sensors are sampled on the 10 Hz grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
 
 # Optional dedicated stress test for cross-source prior contamination.
 # If enabled (and SYNCHRONOUS_SENSOR_SPECIAL_CASE is False), the disturbed
@@ -190,7 +191,6 @@ ENABLE_SENSOR_2_DROPOUT = True
 
 SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
-SHOW_PROJECTED_PROBABILITY = True  # PP is secondary; d/u are primary plots.
 SHOW_POSITION_ERROR = True
 
 # Dynamic Plotly dashboard; the slider uses integer union-event steps.
@@ -260,16 +260,12 @@ GRIEBEL_BACKEND = "auto"  # "auto" | "native" | "placeholder"
 #     provide a current measurement.
 GRIEBEL_ASYNC_EXTENSION_MODE = "active_only"
 
-# The public-ish KalmanSelfAssessor interface used here exposes
-# (delta, uncertainty, eta), not the complete internal SL source opinion.
-# Consequently we do NOT reconstruct an opinion after the hard threshold and
-# do NOT perform a pseudo-ABF.  That would destroy the continuous information
-# before fusion and yield a misleading binary d_norm curve.
-#
-# The optional quantity below is only a constructed, decision-level temporal
-# summary of the native threshold decisions.  Keep it for qualitative context,
-# but never label it as native Griebel multi-source ABF.
-GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP = True
+# Evaluation B uses Griebel's *pre-threshold* multinomial source opinions.
+# get_sas_measures() itself exposes only (delta, uncertainty, eta), therefore
+# the adapter below reads KalmanSelfAssessor._op_st directly and validates its
+# numerical components by reproducing the returned delta/u before ABF.  No
+# opinion is reconstructed from a hard decision and
+# no projected-probability comparison is used.
 
 # Output-level construction is hierarchical and separates inconsistency
 # evidence from missing-information uncertainty:
@@ -354,7 +350,6 @@ GRIEBEL_N_ST = 35
 GRIEBEL_N_C = 1
 GRIEBEL_ALPHA_THRESHOLD_DC = 0.1
 GRIEBEL_TRUST_DISCOUNT = 0.99
-GRIEBEL_OVERALL_WINDOW = 35
 
 ASSUME_DETECTION_PROBABILITY_ONE = True
 NOMINAL_BURN_IN_S = CONSISTENCY_SHORT_TERM_HORIZON_S
@@ -1361,49 +1356,60 @@ class GriebelMeasure:
         return bool(self.delta < self.eta)
 
 
-class GriebelReferenceBackend:
-    """Adapter around the optional aduulm-stonesoup KalmanSelfAssessor.
+@dataclass(frozen=True)
+class GriebelNativeOpinionSnapshot:
+    """Numerical snapshot of one native Griebel multinomial opinion.
 
-    Native quantities
-    -----------------
-    ``assess`` and ``get_sas_measures`` are used directly.  For each evaluated
-    sensor the backend stores the native
-
-        delta_s,  u_s,  eta_s,  accepted_s = (delta_s < eta_s).
-
-    No pseudo-opinion reconstruction
-    ---------------------------------
-    The interface used here does not expose the complete internal SL source
-    opinion required to reproduce Griebel's published multi-source ABF exactly.
-    Reconstructing
-
-        accepted -> (1-u, 0, u),  rejected -> (0, 1-u, u)
-
-    after thresholding is methodologically invalid for our comparison because
-    it discards the continuous pre-threshold information; furthermore
-    d/(1-u) then collapses identically to 0 or 1.  This backend therefore does
-    NOT create or fuse such pseudo-opinions.
-
-    Constructed decision-level summary
-    ----------------------------------
-    Optionally, a sliding temporal summary of the native threshold decisions is
-    retained as a *constructed diagnostic only*.  It is useful for visually
-    comparing decision timing, but it must not be described as the published
-    multi-source SL fusion.
-
-    Asynchronous comparison semantics
-    ----------------------------------
-    ``active_only``:
-        use only native sensor decisions generated at the current union event.
-        This is the fairest best-effort asynchronous decision-level extension.
-
-    ``hold_last``:
-        use the latest decision of every configured sensor.  Source age is
-        stored explicitly; this mode is intended for stale-source/dropout stress.
-
-    ``synchronous_only``:
-        update the reference only when every configured sensor is active.
+    ``KalmanSelfAssessor`` uses Stone-Soup's own Subjective-Logic classes while
+    the proposed method in this script uses the external ``subjective_logic``
+    package.  Keeping the Griebel branch as plain numerical opinion components
+    avoids mixing the two incompatible Python class hierarchies during ABF.
     """
+
+    belief: np.ndarray
+    uncertainty: float
+    base_rate: np.ndarray
+    projection: np.ndarray
+
+
+class GriebelReferenceBackend:
+    """Adapter around the native ``KalmanSelfAssessor`` for Evaluation B.
+
+    ``get_sas_measures()`` exposes ``(delta, u, eta)``, but Griebel's
+    multi-source ABF operates on the *resulting single-sensor SA opinions*
+    ``omega_X^(s)``.  These must not be confused with the short-term memory
+    ``omega_st`` (``_op_st``): the native assessor first combines its short-
+    and long-term memories and only then computes ``delta`` from the resulting
+    opinion against the dogmatic Gaussian reference.
+
+    The adapter therefore locates compatible native multinomial opinions in the
+    assessor object graph, reads their numerical components through the native
+    API (``belief``, ``uncertainty``, ``baseRate``, ``get_proj_prob`` and
+    compatible spellings), and accepts a source only if both its uncertainty
+    and its DC reproduce the public native output.  The Gaussian reference is
+    taken from the native base-rate vector: in Griebel's construction the
+    reference is dogmatic with ``b_ref = a_X`` and ``u_ref = 0``.
+
+    If the final opinion is not stored explicitly, the adapter additionally
+    tests CBF combinations of the exposed native memory opinions.  This still
+    uses the native pre-decision SL state; no opinion is reconstructed from a
+    hard threshold decision or from ``delta`` alone.
+
+    The validated source snapshots are then fused with Average Belief Fusion
+    (ABF) in multinomial opinion space,
+
+        omega_G^ABF = ABF(omega_G,1, omega_G,2, ...),
+
+    and the fused DC to the same dogmatic Gaussian reference is used in
+    Evaluation B / Figure 5.
+    """
+
+    _OPINION_U_TOL = 5e-5
+    _OPINION_DC_TOL = 5e-5
+    _COMPONENT_TOL = 5e-4
+    _DOGMATIC_EPS = 1e-12
+    _MAX_OBJECT_GRAPH_DEPTH = 7
+    _MAX_CONTAINER_ITEMS = 128
 
     def __init__(self, sensor_ids: Iterable[int], dim_meas: int = 2):
         self.sensor_ids = sorted(sensor_ids)
@@ -1419,7 +1425,8 @@ class GriebelReferenceBackend:
             sensor_id: None for sensor_id in self.sensor_ids
         }
 
-        # Direct native single-sensor outputs.
+        # Native single-sensor outputs retained for Evaluation A / the
+        # cross-contamination diagnostic.
         self.sensor_times = {sensor_id: [] for sensor_id in self.sensor_ids}
         self.sensor_delta = {sensor_id: [] for sensor_id in self.sensor_ids}
         self.sensor_eta = {sensor_id: [] for sensor_id in self.sensor_ids}
@@ -1427,14 +1434,31 @@ class GriebelReferenceBackend:
             sensor_id: [] for sensor_id in self.sensor_ids
         }
 
-        # Constructed decision-level temporal summary (NOT native Griebel ABF).
-        self.overall_window: deque = deque(maxlen=GRIEBEL_OVERALL_WINDOW)
-        self.overall_times_s: list[float] = []
-        self.overall_p_ok: list[float] = []
-        self.overall_uncertainty: list[float] = []
-        self.overall_true_fraction: list[float] = []
-        self.overall_source_count: list[int] = []
-        self.overall_max_source_age_s: list[float] = []
+        # Latest validated resulting single-sensor SA snapshots.  They are
+        # recovered from native opinion state, never from a threshold decision.
+        self.latest_native_opinion: dict[
+            int, GriebelNativeOpinionSnapshot | None
+        ] = {sensor_id: None for sensor_id in self.sensor_ids}
+        self.native_reference_projection: dict[int, np.ndarray | None] = {
+            sensor_id: None for sensor_id in self.sensor_ids
+        }
+        self.native_reference_uncertainty: dict[int, float | None] = {
+            sensor_id: None for sensor_id in self.sensor_ids
+        }
+        self.native_opinion_path: dict[int, str | None] = {
+            sensor_id: None for sensor_id in self.sensor_ids
+        }
+        self.native_reference_path: dict[int, str | None] = {
+            sensor_id: None for sensor_id in self.sensor_ids
+        }
+
+        # Evaluation-B output: ABF of the validated Griebel source opinions,
+        # followed by the same DC-to-reference calculation.
+        self.abf_times_s: list[float] = []
+        self.abf_delta: list[float] = []
+        self.abf_uncertainty: list[float] = []
+        self.abf_source_count: list[int] = []
+        self.abf_max_source_age_s: list[float] = []
 
         if not self.enabled:
             return
@@ -1453,7 +1477,9 @@ class GriebelReferenceBackend:
                         trust_discount=GRIEBEL_TRUST_DISCOUNT,
                     )
                 self.native = True
-                self.status = "native KalmanSelfAssessor"
+                self.status = (
+                    "native KalmanSelfAssessor + validated native ABF"
+                )
                 return
             except Exception as exc:  # noqa: BLE001
                 self.status = f"native init failed -> placeholder: {exc!r}"
@@ -1482,10 +1508,7 @@ class GriebelReferenceBackend:
             )
         return mode
 
-    def should_update_event(
-        self,
-        active_sensor_ids: list[int],
-    ) -> bool:
+    def should_update_event(self, active_sensor_ids: list[int]) -> bool:
         """Return whether native active-sensor assessors are evaluated now."""
         if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
             return True
@@ -1497,11 +1520,8 @@ class GriebelReferenceBackend:
             return set(active_sensor_ids) == set(self.sensor_ids)
         raise AssertionError("unreachable")
 
-    def _selected_source_ids(
-        self,
-        active_sensor_ids: list[int],
-    ) -> list[int]:
-        """Source decisions used only by the constructed decision summary."""
+    def _selected_source_ids(self, active_sensor_ids: list[int]) -> list[int]:
+        """Return native source opinions used by the current Griebel ABF."""
         if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
             return list(self.sensor_ids)
 
@@ -1517,6 +1537,637 @@ class GriebelReferenceBackend:
                 else []
             )
         raise AssertionError("unreachable")
+
+    @staticmethod
+    def _member_value(obj, name: str):
+        """Read a zero-argument method/property from either an object or dict."""
+        if isinstance(obj, dict):
+            if name not in obj:
+                raise AttributeError(name)
+            value = obj[name]
+        else:
+            value = getattr(obj, name)
+        return value() if callable(value) else value
+
+    @classmethod
+    def _first_scalar_member(
+        cls,
+        obj,
+        names: tuple[str, ...],
+    ) -> tuple[float | None, str | None]:
+        for name in names:
+            try:
+                value = cls._member_value(obj, name)
+                array = np.asarray(value, dtype=float).reshape(-1)
+            except Exception:  # noqa: BLE001 - compatibility probing
+                continue
+            if array.size == 1 and np.isfinite(array[0]):
+                return float(array[0]), name
+        return None, None
+
+    @classmethod
+    def _first_vector_member(
+        cls,
+        obj,
+        names: tuple[str, ...],
+    ) -> tuple[np.ndarray | None, str | None]:
+        for name in names:
+            try:
+                value = cls._member_value(obj, name)
+                array = np.asarray(value, dtype=float).reshape(-1)
+            except Exception:  # noqa: BLE001 - compatibility probing
+                continue
+            if (
+                array.size == GRIEBEL_NUM_X
+                and np.all(np.isfinite(array))
+            ):
+                return array, name
+        return None, None
+
+    @classmethod
+    def _generic_vector_candidates(cls, obj) -> list[tuple[str, np.ndarray]]:
+        """Return W-dimensional numeric arrays stored directly on an object."""
+        try:
+            attributes = vars(obj)
+        except TypeError:
+            attributes = {}
+
+        candidates: list[tuple[str, np.ndarray]] = []
+        for name, value in attributes.items():
+            try:
+                array = np.asarray(value, dtype=float).reshape(-1)
+            except Exception:  # noqa: BLE001
+                continue
+            if (
+                array.size == GRIEBEL_NUM_X
+                and np.all(np.isfinite(array))
+            ):
+                candidates.append((name, array))
+        return candidates
+
+    @classmethod
+    def _dc_from_projection(
+        cls,
+        projection: np.ndarray,
+        uncertainty_value: float,
+        reference_projection: np.ndarray,
+        reference_uncertainty: float = 0.0,
+    ) -> float:
+        """Griebel/Joesang degree of conflict: DC = PD * CC."""
+        projection = np.asarray(projection, dtype=float).reshape(-1)
+        reference_projection = np.asarray(
+            reference_projection, dtype=float
+        ).reshape(-1)
+        if projection.shape != reference_projection.shape:
+            raise ValueError(
+                "Native Griebel opinion/reference domain mismatch: "
+                f"{projection.shape} vs {reference_projection.shape}"
+            )
+
+        pd = 0.5 * float(np.sum(np.abs(projection - reference_projection)))
+        cc = (
+            (1.0 - float(uncertainty_value))
+            * (1.0 - float(reference_uncertainty))
+        )
+        return float(np.clip(pd * cc, 0.0, 1.0))
+
+    @classmethod
+    def _make_snapshot(
+        cls,
+        belief: np.ndarray,
+        uncertainty_value: float,
+        base_rate: np.ndarray,
+        projection: np.ndarray | None = None,
+    ) -> GriebelNativeOpinionSnapshot:
+        belief = np.asarray(belief, dtype=float).reshape(-1)
+        base_rate = np.asarray(base_rate, dtype=float).reshape(-1)
+        u = float(uncertainty_value)
+
+        if belief.size != GRIEBEL_NUM_X or base_rate.size != GRIEBEL_NUM_X:
+            raise ValueError("Wrong Griebel opinion dimension")
+        if not np.all(np.isfinite(belief)) or not np.all(np.isfinite(base_rate)):
+            raise ValueError("Non-finite Griebel opinion component")
+        if not np.isfinite(u) or u < -cls._COMPONENT_TOL or u > 1.0 + cls._COMPONENT_TOL:
+            raise ValueError(f"Invalid Griebel uncertainty: {u}")
+        u = float(np.clip(u, 0.0, 1.0))
+
+        # Permit only tiny floating-point excursions outside the simplex.
+        if np.min(belief) < -cls._COMPONENT_TOL:
+            raise ValueError(
+                f"Invalid negative Griebel belief mass: min={np.min(belief)}"
+            )
+        if np.min(base_rate) < -cls._COMPONENT_TOL:
+            raise ValueError(
+                f"Invalid negative Griebel base rate: min={np.min(base_rate)}"
+            )
+        belief = np.where(np.abs(belief) < 1e-14, 0.0, belief)
+        base_rate = np.where(np.abs(base_rate) < 1e-14, 0.0, base_rate)
+
+        if not np.isclose(
+            float(np.sum(belief)) + u,
+            1.0,
+            atol=cls._COMPONENT_TOL,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "Griebel belief + uncertainty does not sum to one: "
+                f"sum(b)={np.sum(belief):.9g}, u={u:.9g}"
+            )
+        if not np.isclose(
+            float(np.sum(base_rate)),
+            1.0,
+            atol=cls._COMPONENT_TOL,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "Griebel base-rate vector does not sum to one: "
+                f"sum(a)={np.sum(base_rate):.9g}"
+            )
+
+        expected_projection = belief + base_rate * u
+        if projection is None:
+            projection = expected_projection
+        else:
+            projection = np.asarray(projection, dtype=float).reshape(-1)
+            if projection.size != GRIEBEL_NUM_X or not np.all(np.isfinite(projection)):
+                raise ValueError("Invalid Griebel projected-probability vector")
+            if np.min(projection) < -cls._COMPONENT_TOL:
+                raise ValueError(
+                    "Invalid negative Griebel projected probability: "
+                    f"min={np.min(projection)}"
+                )
+            if not np.allclose(
+                projection,
+                expected_projection,
+                atol=cls._COMPONENT_TOL,
+                rtol=0.0,
+            ):
+                raise ValueError(
+                    "Native projected probabilities are inconsistent with "
+                    "belief + baseRate * uncertainty"
+                )
+
+        if not np.isclose(
+            float(np.sum(projection)),
+            1.0,
+            atol=cls._COMPONENT_TOL,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "Griebel projected probabilities do not sum to one: "
+                f"sum(P)={np.sum(projection):.9g}"
+            )
+
+        return GriebelNativeOpinionSnapshot(
+            belief=belief.copy(),
+            uncertainty=u,
+            base_rate=base_rate.copy(),
+            projection=np.asarray(projection, dtype=float).copy(),
+        )
+
+    @classmethod
+    def _snapshot_opinion_object(
+        cls,
+        native_opinion,
+    ) -> tuple[GriebelNativeOpinionSnapshot, str]:
+        """Convert one native Stone-Soup SL opinion to numerical components.
+
+        The currently used ADUULM class exposes exactly the camelCase/native
+        members ``belief``, ``uncertainty``, ``baseRate`` and
+        ``get_proj_prob``.  Additional spellings keep the adapter compatible
+        with nearby revisions.
+        """
+        u, u_name = cls._first_scalar_member(
+            native_opinion,
+            (
+                "uncertainty",
+                "u",
+                "_u",
+                "get_uncertainty",
+                "getUncertainty",
+            ),
+        )
+        if u is None:
+            raise ValueError("No scalar uncertainty member")
+
+        belief, belief_name = cls._first_vector_member(
+            native_opinion,
+            (
+                "belief",
+                "belief_masses",
+                "beliefMasses",
+                "b",
+                "_b",
+                "get_belief",
+                "getBelief",
+            ),
+        )
+        base_rate, base_name = cls._first_vector_member(
+            native_opinion,
+            (
+                "baseRate",      # ADUULM native implementation
+                "base_rate",
+                "base_rates",
+                "prior_belief_masses",
+                "prior",
+                "a",
+                "_a",
+                "get_base_rate",
+                "getBaseRate",
+            ),
+        )
+        projection, projection_name = cls._first_vector_member(
+            native_opinion,
+            (
+                "get_proj_prob",  # ADUULM native implementation
+                "getProjection",
+                "get_projection",
+                "get_projected_probability",
+                "getProjectedProbability",
+                "getProjectedProbabilities",
+                "projection",
+                "projected_probability",
+                "projected_probabilities",
+            ),
+        )
+
+        # The native API normally gives all three vectors.  If one of b/a is
+        # absent but P is exposed, infer only that missing numerical component
+        # from the defining SL identity P = b + a*u.  Nothing is inferred from
+        # delta or from the threshold decision.
+        if belief is None and base_rate is not None and projection is not None:
+            belief = projection - base_rate * u
+            belief_name = f"{projection_name}-{base_name}*{u_name}"
+        if base_rate is None and belief is not None and projection is not None and u > cls._DOGMATIC_EPS:
+            base_rate = (projection - belief) / u
+            base_name = f"({projection_name}-{belief_name})/{u_name}"
+
+        # Compatibility fallback for revisions that use opaque vector names.
+        vectors = cls._generic_vector_candidates(native_opinion)
+        if belief is None:
+            for name, vector in vectors:
+                if np.isclose(
+                    np.sum(vector), 1.0 - u,
+                    atol=cls._COMPONENT_TOL,
+                    rtol=0.0,
+                ):
+                    belief = vector.copy()
+                    belief_name = f"vars[{name!r}]"
+                    break
+        if base_rate is None:
+            for name, vector in vectors:
+                if np.isclose(
+                    np.sum(vector), 1.0,
+                    atol=cls._COMPONENT_TOL,
+                    rtol=0.0,
+                ):
+                    # Prefer a vector that also makes the exposed projection
+                    # identity valid, when a projection is available.
+                    if projection is not None and belief is not None:
+                        if not np.allclose(
+                            belief + vector * u,
+                            projection,
+                            atol=cls._COMPONENT_TOL,
+                            rtol=0.0,
+                        ):
+                            continue
+                    base_rate = vector.copy()
+                    base_name = f"vars[{name!r}]"
+                    break
+
+        if belief is None or base_rate is None:
+            raise ValueError(
+                "Could not identify native belief/base-rate vectors"
+            )
+
+        if projection is None:
+            projection = belief + base_rate * u
+            projection_name = f"{belief_name}+{base_name}*{u_name}"
+
+        snapshot = cls._make_snapshot(
+            belief,
+            u,
+            base_rate,
+            projection,
+        )
+        component_path = (
+            f"b={belief_name}, u={u_name}, a={base_name}, P={projection_name}"
+        )
+        return snapshot, component_path
+
+    @classmethod
+    def _collect_native_opinion_candidates(
+        cls,
+        assessor,
+    ) -> list[tuple[str, GriebelNativeOpinionSnapshot]]:
+        """Find native multinomial opinions in a bounded assessor object graph."""
+        stack: list[tuple[str, object, int]] = [("assessor", assessor, 0)]
+        seen: set[int] = set()
+        candidates: list[tuple[str, GriebelNativeOpinionSnapshot]] = []
+
+        primitive_types = (
+            str,
+            bytes,
+            int,
+            float,
+            complex,
+            bool,
+            type(None),
+            datetime,
+            Path,
+            np.ndarray,
+            np.generic,
+        )
+
+        while stack:
+            path, value, depth = stack.pop()
+            value_id = id(value)
+            if value_id in seen:
+                continue
+            seen.add(value_id)
+
+            try:
+                snapshot, component_path = cls._snapshot_opinion_object(value)
+            except Exception:  # noqa: BLE001 - external object probing
+                snapshot = None
+            if snapshot is not None:
+                candidates.append(
+                    (f"{path} [{type(value).__name__}; {component_path}]", snapshot)
+                )
+                # Do not descend into the implementation details of an opinion.
+                continue
+
+            # Some temporal-evidence containers only expose the current opinion
+            # on demand.  Probe only known side-effect-free opinion accessors.
+            for accessor_name in ("get_opinion", "getOpinion", "as_opinion"):
+                try:
+                    accessor = getattr(value, accessor_name, None)
+                except Exception:  # noqa: BLE001
+                    accessor = None
+                if not callable(accessor):
+                    continue
+                try:
+                    accessor_value = accessor()
+                    accessor_snapshot, component_path = cls._snapshot_opinion_object(
+                        accessor_value
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                candidates.append(
+                    (
+                        f"{path}.{accessor_name}() "
+                        f"[{type(accessor_value).__name__}; {component_path}]",
+                        accessor_snapshot,
+                    )
+                )
+
+            if depth >= cls._MAX_OBJECT_GRAPH_DEPTH:
+                continue
+            if isinstance(value, primitive_types):
+                continue
+            if isinstance(value, type) or callable(value):
+                continue
+
+            if isinstance(value, dict):
+                items = list(value.items())[-cls._MAX_CONTAINER_ITEMS :]
+                for key, child in items:
+                    stack.append((f"{path}[{key!r}]", child, depth + 1))
+                continue
+
+            if isinstance(value, (list, tuple, deque, set, frozenset)):
+                values = list(value)[-cls._MAX_CONTAINER_ITEMS :]
+                for index, child in enumerate(values):
+                    stack.append((f"{path}[{index}]", child, depth + 1))
+                continue
+
+            try:
+                attributes = vars(value)
+            except TypeError:
+                attributes = {}
+            for name, child in attributes.items():
+                if name.startswith("__"):
+                    continue
+                stack.append((f"{path}.{name}", child, depth + 1))
+
+        # Remove numerically identical duplicates that may have been reached via
+        # both a stored attribute and a get_opinion() accessor.
+        unique: list[tuple[str, GriebelNativeOpinionSnapshot]] = []
+        for path, snapshot in candidates:
+            duplicate = False
+            for _, previous in unique:
+                if (
+                    np.allclose(snapshot.belief, previous.belief, atol=1e-12, rtol=0.0)
+                    and np.isclose(snapshot.uncertainty, previous.uncertainty, atol=1e-12, rtol=0.0)
+                    and np.allclose(snapshot.base_rate, previous.base_rate, atol=1e-12, rtol=0.0)
+                ):
+                    duplicate = True
+                    break
+            if not duplicate:
+                unique.append((path, snapshot))
+        return unique
+
+    @classmethod
+    def _fuse_native_cbf_pair(
+        cls,
+        left: GriebelNativeOpinionSnapshot,
+        right: GriebelNativeOpinionSnapshot,
+    ) -> GriebelNativeOpinionSnapshot:
+        """CBF of two non-dogmatic multinomial opinions with a common base rate."""
+        if not np.allclose(left.base_rate, right.base_rate, atol=1e-8, rtol=0.0):
+            raise ValueError("CBF candidates have different base rates")
+
+        u1 = float(left.uncertainty)
+        u2 = float(right.uncertainty)
+        if u1 <= cls._DOGMATIC_EPS or u2 <= cls._DOGMATIC_EPS:
+            raise ValueError("Dogmatic CBF fallback is intentionally not guessed")
+
+        denominator = u1 + u2 - u1 * u2
+        if denominator <= cls._DOGMATIC_EPS:
+            raise ValueError("Degenerate CBF denominator")
+
+        fused_u = u1 * u2 / denominator
+        fused_b = (
+            left.belief * u2 + right.belief * u1
+        ) / denominator
+        return cls._make_snapshot(
+            fused_b,
+            fused_u,
+            left.base_rate,
+            fused_b + left.base_rate * fused_u,
+        )
+
+    @classmethod
+    def _candidate_matches_public_measure(
+        cls,
+        snapshot: GriebelNativeOpinionSnapshot,
+        measure: GriebelMeasure,
+    ) -> tuple[float, float, float]:
+        """Return (total score, DC error, u error) for Griebel's native reference.
+
+        Griebel's reference is dogmatic and uses the same Gaussian base-rate
+        vector as the evidence-based opinion, hence P_ref = a_X and u_ref = 0.
+        """
+        reproduced_delta = cls._dc_from_projection(
+            snapshot.projection,
+            snapshot.uncertainty,
+            snapshot.base_rate,
+            0.0,
+        )
+        dc_error = abs(reproduced_delta - measure.delta)
+        u_error = abs(snapshot.uncertainty - measure.uncertainty)
+        return dc_error + u_error, dc_error, u_error
+
+    @classmethod
+    def _degree_of_conflict_to_reference(
+        cls,
+        opinion: GriebelNativeOpinionSnapshot,
+        reference_projection: np.ndarray,
+        reference_uncertainty: float,
+    ) -> float:
+        return cls._dc_from_projection(
+            opinion.projection,
+            opinion.uncertainty,
+            reference_projection,
+            reference_uncertainty,
+        )
+
+    @classmethod
+    def _identify_current_native_opinion(
+        cls,
+        assessor,
+        measure: GriebelMeasure,
+    ) -> tuple[
+        GriebelNativeOpinionSnapshot, np.ndarray, float, str, str
+    ]:
+        """Recover Griebel's resulting single-sensor opinion ``omega_X``.
+
+        The public ``delta`` is computed from the resulting opinion after the
+        short-/long-term memory logic, not necessarily from ``_op_st``.  We
+        therefore search the native assessor state and validate candidates
+        numerically against the public ``(delta, u)`` output.
+        """
+        if not measure.valid:
+            raise RuntimeError(
+                "Cannot recover a native Griebel opinion from invalid "
+                "get_sas_measures() output."
+            )
+
+        direct_candidates = cls._collect_native_opinion_candidates(assessor)
+        if not direct_candidates:
+            try:
+                assessor_members = [
+                    name for name in dir(assessor) if not name.startswith("__")
+                ]
+            except Exception:  # noqa: BLE001
+                assessor_members = []
+            raise RuntimeError(
+                "No readable native multinomial Subjective-Logic opinion with "
+                f"{GRIEBEL_NUM_X} states was found in KalmanSelfAssessor. "
+                "Expected an opinion exposing belief/uncertainty/baseRate "
+                "(or compatible members). Assessor members: "
+                f"{assessor_members[:60]}"
+            )
+
+        evaluated: list[
+            tuple[float, float, float, str, GriebelNativeOpinionSnapshot]
+        ] = []
+        for path, snapshot in direct_candidates:
+            score, dc_error, u_error = cls._candidate_matches_public_measure(
+                snapshot, measure
+            )
+            evaluated.append((score, dc_error, u_error, path, snapshot))
+
+        # The final omega_X may be created transiently by fusing the native
+        # short- and long-term memories.  If it is not stored as an attribute,
+        # reproduce only that documented CBF operation from native opinions and
+        # validate the result against the public output.  This is NOT a
+        # reconstruction from delta/eta or a hard threshold decision.
+        if not any(
+            dc_error <= cls._OPINION_DC_TOL
+            and u_error <= cls._OPINION_U_TOL
+            for _, dc_error, u_error, _, _ in evaluated
+        ):
+            max_pair_candidates = min(len(direct_candidates), 24)
+            for i in range(max_pair_candidates):
+                left_path, left = direct_candidates[i]
+                for j in range(i + 1, max_pair_candidates):
+                    right_path, right = direct_candidates[j]
+                    try:
+                        fused = cls._fuse_native_cbf_pair(left, right)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    score, dc_error, u_error = cls._candidate_matches_public_measure(
+                        fused, measure
+                    )
+                    evaluated.append(
+                        (
+                            score,
+                            dc_error,
+                            u_error,
+                            f"CBF({left_path}, {right_path})",
+                            fused,
+                        )
+                    )
+
+        evaluated.sort(key=lambda item: item[0])
+        for _, dc_error, u_error, path, snapshot in evaluated:
+            if (
+                dc_error <= cls._OPINION_DC_TOL
+                and u_error <= cls._OPINION_U_TOL
+            ):
+                reference_projection = snapshot.base_rate.copy()
+                reproduced_delta = cls._degree_of_conflict_to_reference(
+                    snapshot,
+                    reference_projection,
+                    0.0,
+                )
+                if not np.isclose(
+                    reproduced_delta,
+                    measure.delta,
+                    atol=cls._OPINION_DC_TOL,
+                    rtol=0.0,
+                ):
+                    raise AssertionError("internal Griebel validation mismatch")
+                return (
+                    snapshot,
+                    reference_projection,
+                    0.0,
+                    path,
+                    "dogmatic native Gaussian reference from baseRate "
+                    "(b_ref=a_X, u_ref=0), validated against public delta",
+                )
+
+        diagnostics = []
+        for _, dc_error, u_error, path, snapshot in evaluated[:12]:
+            dc_value = cls._dc_from_projection(
+                snapshot.projection,
+                snapshot.uncertainty,
+                snapshot.base_rate,
+                0.0,
+            )
+            diagnostics.append(
+                f"{path}: u={snapshot.uncertainty:.6g} "
+                f"(u_err={u_error:.3g}), DC_ref={dc_value:.6g} "
+                f"(dc_err={dc_error:.3g}), "
+                f"a={np.array2string(snapshot.base_rate, precision=4)}"
+            )
+
+        try:
+            assessor_members = [
+                name for name in dir(assessor) if not name.startswith("__")
+            ]
+        except Exception:  # noqa: BLE001
+            assessor_members = []
+        raise RuntimeError(
+            "Could not recover Griebel's resulting single-sensor opinion "
+            "omega_X from KalmanSelfAssessor. Importantly, _op_st is only the "
+            "short-term memory and is not required to equal the public SA "
+            "opinion. Candidates were evaluated with the native Gaussian "
+            "baseRate as the dogmatic reference. Expected "
+            f"delta={measure.delta:.6g}, u={measure.uncertainty:.6g}. "
+            "Best candidates: " + "; ".join(diagnostics) + ". "
+            f"Assessor members: {assessor_members[:60]}"
+        )
 
     def assess_sensor(
         self,
@@ -1535,7 +2186,9 @@ class GriebelReferenceBackend:
             measurement_prediction.covar,
             measurement.state_vector,
         )
-        values = np.asarray(assessor.get_sas_measures(), dtype=float).reshape(-1)
+        values = np.asarray(
+            assessor.get_sas_measures(), dtype=float
+        ).reshape(-1)
         if values.size < 3:
             measure = GriebelMeasure()
         else:
@@ -1553,61 +2206,184 @@ class GriebelReferenceBackend:
         self.sensor_delta[sensor_id].append(measure.delta)
         self.sensor_eta[sensor_id].append(measure.eta)
         self.sensor_uncertainty[sensor_id].append(measure.uncertainty)
+
+        if measure.valid:
+            (
+                source_opinion,
+                reference_projection,
+                reference_u,
+                source_path,
+                reference_path,
+            ) = self._identify_current_native_opinion(assessor, measure)
+
+            self.latest_native_opinion[sensor_id] = source_opinion
+            self.native_reference_projection[sensor_id] = (
+                reference_projection.copy()
+            )
+            self.native_reference_uncertainty[sensor_id] = float(reference_u)
+
+            if self.native_opinion_path[sensor_id] is None:
+                self.native_opinion_path[sensor_id] = source_path
+                self.native_reference_path[sensor_id] = reference_path
+                print(
+                    f"  Griebel S{sensor_id}: validated native opinion at "
+                    f"{source_path}; reference={reference_path}"
+                )
+
         return measure
 
-    def _append_constructed_decision_summary(
+    @classmethod
+    def _fuse_native_abf(
+        cls,
+        opinions: list[GriebelNativeOpinionSnapshot],
+    ) -> GriebelNativeOpinionSnapshot:
+        """Average Belief Fusion for multinomial opinions with common base rate.
+
+        For non-dogmatic opinions this is the evidence-average form of ABF:
+
+            u_F = N / sum_i(1/u_i)
+            b_F = sum_i(b_i/u_i) / sum_i(1/u_i)
+
+        which is algebraically equivalent to the standard multi-source ABF.
+        All Griebel sensor opinions use the same Gaussian base-rate vector;
+        this is checked explicitly before fusion.
+        """
+        if not opinions:
+            raise ValueError("ABF requires at least one native source opinion")
+        if len(opinions) == 1:
+            op = opinions[0]
+            return GriebelNativeOpinionSnapshot(
+                belief=op.belief.copy(),
+                uncertainty=float(op.uncertainty),
+                base_rate=op.base_rate.copy(),
+                projection=op.projection.copy(),
+            )
+
+        base_rate = opinions[0].base_rate
+        for opinion in opinions[1:]:
+            if not np.allclose(
+                base_rate, opinion.base_rate, atol=1e-8, rtol=0.0
+            ):
+                raise RuntimeError(
+                    "Griebel source opinions have different base rates; "
+                    "this Evaluation-B ABF assumes the common PIT-bin base rate."
+                )
+
+        uncertainties = np.asarray(
+            [op.uncertainty for op in opinions], dtype=float
+        )
+        dogmatic = uncertainties <= cls._DOGMATIC_EPS
+
+        if np.any(dogmatic):
+            # Limiting case: non-dogmatic sources have zero influence.  With no
+            # extra relative dogmatic weights available, equally average all
+            # dogmatic sources.
+            dogmatic_beliefs = np.stack(
+                [
+                    opinions[i].belief
+                    for i in np.flatnonzero(dogmatic)
+                ],
+                axis=0,
+            )
+            fused_u = 0.0
+            fused_b = np.mean(dogmatic_beliefs, axis=0)
+        else:
+            inverse_u = 1.0 / uncertainties
+            denominator = float(np.sum(inverse_u))
+            fused_u = float(len(opinions) / denominator)
+            fused_b = (
+                np.sum(
+                    np.stack(
+                        [
+                            op.belief / op.uncertainty
+                            for op in opinions
+                        ],
+                        axis=0,
+                    ),
+                    axis=0,
+                )
+                / denominator
+            )
+
+        fused_projection = fused_b + base_rate * fused_u
+        return cls._make_snapshot(
+            fused_b,
+            fused_u,
+            base_rate,
+            fused_projection,
+        )
+
+    def _append_native_abf(
         self,
         timestamp: datetime,
         start_time: datetime,
         selected_ids: list[int],
     ) -> None:
-        if not GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP:
-            return
-
-        decisions = []
+        opinions: list[GriebelNativeOpinionSnapshot] = []
+        reference_projections = []
+        reference_uncertainties = []
         source_ages = []
+
         for sensor_id in selected_ids:
-            measure = self.latest_measure[sensor_id]
+            opinion = self.latest_native_opinion[sensor_id]
+            reference_projection = self.native_reference_projection[sensor_id]
+            reference_u = self.native_reference_uncertainty[sensor_id]
             source_timestamp = self.latest_timestamp[sensor_id]
-            accepted = measure.accepted
-            if accepted is None or source_timestamp is None:
-                # Important for hold_last during startup.
+
+            if (
+                opinion is None
+                or reference_projection is None
+                or reference_u is None
+                or source_timestamp is None
+            ):
                 return
-            decisions.append(float(accepted))
+
+            opinions.append(opinion)
+            reference_projections.append(reference_projection)
+            reference_uncertainties.append(float(reference_u))
             source_ages.append(
                 max(0.0, (timestamp - source_timestamp).total_seconds())
             )
 
-        if not decisions:
+        if not opinions:
             return
 
-        # This deliberately stays at the decision level.  It is a smoothed
-        # visualization of native threshold outcomes, NOT a reconstruction of
-        # Griebel's original source opinions or multi-source ABF.
-        true_fraction = float(np.mean(decisions))
-        evidence = np.array(
-            [true_fraction, 1.0 - true_fraction],
-            dtype=float,
+        reference_projection = np.asarray(
+            reference_projections[0], dtype=float
         )
-        step_opinion = sl.DirichletDistribution2d.from_evidences(
-            evidence
-        ).as_opinion()
+        reference_u = reference_uncertainties[0]
+        for other_projection, other_u in zip(
+            reference_projections[1:],
+            reference_uncertainties[1:],
+        ):
+            if not np.allclose(
+                reference_projection,
+                other_projection,
+                atol=1e-8,
+                rtol=0.0,
+            ) or not np.isclose(
+                reference_u,
+                other_u,
+                atol=1e-10,
+                rtol=0.0,
+            ):
+                raise RuntimeError(
+                    "Griebel source assessors expose different reference "
+                    "opinions; one common ABF-to-reference DC is undefined."
+                )
 
-        self.overall_window.append(step_opinion)
-        if len(self.overall_window) == 1:
-            overall = deepcopy(self.overall_window[0])
-        else:
-            overall = sl.Fusion.fuse_opinions(
-                sl.FusionType.CUMULATIVE,
-                list(self.overall_window),
-            )
+        fused = self._fuse_native_abf(opinions)
+        fused_delta = self._degree_of_conflict_to_reference(
+            fused,
+            reference_projection,
+            reference_u,
+        )
 
-        self.overall_times_s.append((timestamp - start_time).total_seconds())
-        self.overall_p_ok.append(p_ok(overall))
-        self.overall_uncertainty.append(uncertainty(overall))
-        self.overall_true_fraction.append(true_fraction)
-        self.overall_source_count.append(len(selected_ids))
-        self.overall_max_source_age_s.append(
+        self.abf_times_s.append((timestamp - start_time).total_seconds())
+        self.abf_delta.append(fused_delta)
+        self.abf_uncertainty.append(float(fused.uncertainty))
+        self.abf_source_count.append(len(selected_ids))
+        self.abf_max_source_age_s.append(
             max(source_ages) if source_ages else 0.0
         )
 
@@ -1624,7 +2400,7 @@ class GriebelReferenceBackend:
         if not selected_ids:
             return
 
-        self._append_constructed_decision_summary(
+        self._append_native_abf(
             timestamp,
             start_time,
             selected_ids,
@@ -2190,9 +2966,17 @@ def process_scenario(scenario: ScenarioData) -> ProcessingResult:
         f"n_ST={batch_track_state.n_st}, "
         f"gamma={batch_track_state.discount:.6f}"
     )
+    if disagreement_state is not None:
+        print(
+            "  sensor-pair agreement/disagreement G_12: "
+            f"rate~{disagreement_state.input_rate_hz:.3f} Hz, "
+            f"T_ST={DISAGREEMENT_SHORT_TERM_HORIZON_S:g} s, "
+            f"n_ST={disagreement_state.n_st}, "
+            f"gamma={disagreement_state.discount:.6f}"
+        )
     print(f"  Griebel reference: {griebel.status}")
     print(f"  Griebel async extension: {GRIEBEL_ASYNC_EXTENSION_MODE}")
-    print("  Griebel comparison: native local delta/u/eta + optional constructed decision-level summary")
+    print("  Griebel Evaluation B: validated native source opinions -> ABF -> DC/u vs omega_B and omega_C")
 
     track = Track()
     event_timestamps: list[datetime] = []
@@ -2828,108 +3612,132 @@ def plot_static_results(result: ProcessingResult) -> None:
         fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Figure 5: architecture comparison + decision-level reference context.
+    # Figure 5 / Evaluation B: overall consistency assessment.
     # ------------------------------------------------------------------
     #
-    # The grey and purple curves compare two architectures implemented in the
-    # present PIT/TEF framework.  Native Griebel outputs are shown separately in
-    # the next figure.  The optional dotted decision PP below is only a
-    # constructed temporal summary of Griebel's native threshold decisions; it
-    # is NOT a reconstructed Griebel multi-source ABF opinion.
-    fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
+    # Griebel: native pre-threshold single-sensor SA opinions are fused with
+    # Average Belief Fusion (ABF), then evaluated against Griebel's native
+    # dogmatic Gaussian reference using Degree of Conflict (DC).
+    #
+    # Proposed approach:
+    #   omega_B = WBF(C_1^iso, C_2^iso, C_F)
+    #   omega_C = Deduction(G_12; omega_B, omega_strict)
+    #
+    # The first panel deliberately calls the y-axis "method-specific
+    # inconsistency score": Griebel's delta_ABF and our d_norm are both bounded
+    # [0,1] inconsistency indicators, but they are not mathematically identical
+    # quantities.  The second panel compares their SL uncertainty directly.
+    #
+    fig, axes = plt.subplots(2, 1, figsize=(15, 7), sharex=True)
 
-    axes[0].plot(
-        event_times,
-        [normalized_disbelief(op) for op in result.common_abf_history],
-        color="tab:gray",
-        linestyle="--",
-        alpha=0.85,
-        label=r"common-prior PIT/TEF ABF architecture baseline: $d_{\mathrm{norm}}$",
-    )
-    axes[0].plot(
-        event_times,
-        [normalized_disbelief(op) for op in result.batch_history],
-        color="tab:purple",
-        linewidth=1.6,
-        label=r"proposed direct batch $C_F$: $d_{\mathrm{norm}}$",
-    )
-
-    axes[1].plot(
-        event_times,
-        [uncertainty(op) for op in result.common_abf_history],
-        color="tab:gray",
-        linestyle="--",
-        alpha=0.85,
-        label="common-prior PIT/TEF ABF architecture baseline: uncertainty",
-    )
-    axes[1].plot(
-        event_times,
-        [uncertainty(op) for op in result.batch_history],
-        color="tab:purple",
-        linewidth=1.6,
-        label=r"proposed direct batch $C_F$: uncertainty",
-    )
-
-    if SHOW_PROJECTED_PROBABILITY:
-        axes[2].plot(
-            event_times,
-            [p_ok(op) for op in result.batch_history],
-            color="tab:purple",
-            linewidth=1.5,
-            alpha=0.85,
-            label="proposed direct batch PP (secondary view)",
-        )
-
-    if (
-        result.griebel.native
-        and GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP
-        and result.griebel.overall_times_s
-    ):
-        axes[2].plot(
-            result.griebel.overall_times_s,
-            result.griebel.overall_p_ok,
+    if result.griebel.native and result.griebel.abf_times_s:
+        axes[0].plot(
+            result.griebel.abf_times_s,
+            result.griebel.abf_delta,
             color="black",
-            linestyle=":",
-            linewidth=1.35,
+            linestyle="--",
+            linewidth=1.7,
             label=(
-                "constructed Griebel threshold-decision PP "
-                "(decision-level diagnostic only)"
+                r"Griebel native ABF: "
+                r"$\delta_G^{\mathrm{ABF}}="
+                r"\mathrm{DC}(\omega_G^{\mathrm{ABF}},\omega_G^{ref})$"
             ),
         )
+        axes[1].plot(
+            result.griebel.abf_times_s,
+            result.griebel.abf_uncertainty,
+            color="black",
+            linestyle="--",
+            linewidth=1.7,
+            label=r"Griebel native ABF: $u_G^{\mathrm{ABF}}$",
+        )
+    else:
+        axes[0].text(
+            0.5,
+            0.92,
+            "Native Griebel ABF unavailable",
+            transform=axes[0].transAxes,
+            ha="center",
+            va="top",
+            color="black",
+        )
 
-    axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
+    axes[0].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.track_base_history],
+        color="tab:green",
+        linewidth=1.6,
+        label=(
+            r"proposed base "
+            r"$\omega_B=\mathrm{WBF}(C_1^{iso},C_2^{iso},C_F)$: "
+            r"$d_{\mathrm{norm}}$"
+        ),
+    )
+    axes[0].plot(
+        event_times,
+        [normalized_disbelief(op) for op in result.track_consistency_history],
+        color="tab:blue",
+        linewidth=1.8,
+        label=(
+            r"proposed pair-conditioned "
+            r"$\omega_C=\mathrm{Deduction}(G_{12};"
+            r"\omega_B,\omega_{\mathrm{strict}})$: "
+            r"$d_{\mathrm{norm}}$"
+        ),
+    )
+
+    axes[1].plot(
+        event_times,
+        [uncertainty(op) for op in result.track_base_history],
+        color="tab:green",
+        linewidth=1.6,
+        label=r"proposed base $\omega_B$: $u_B$",
+    )
+    axes[1].plot(
+        event_times,
+        [uncertainty(op) for op in result.track_consistency_history],
+        color="tab:blue",
+        linewidth=1.8,
+        label=r"proposed pair-conditioned $\omega_C$: $u_C$",
+    )
+
+    axes[0].set_title(
+        "Inconsistency response — method-specific normalized scores"
+    )
+    axes[1].set_title("Opinion uncertainty")
+    axes[0].set_ylabel("inconsistency score")
     axes[1].set_ylabel("uncertainty")
-    axes[2].set_ylabel("projected probability")
-    axes[2].set_xlabel("time [s]")
+    axes[1].set_xlabel("time [s]")
 
     for axis in axes:
         axis.grid(True)
         axis.legend(loc="upper right")
         add_disturbance_spans(axis)
-
-    axes[0].set_ylim(-0.02, 1.02)
-    axes[1].set_ylim(-0.02, 1.02)
-    axes[2].set_ylim(-0.02, 1.02)
+        axis.set_ylim(-0.02, 1.02)
 
     if SYNCHRONOUS_SENSOR_SPECIAL_CASE:
         comparison_subtitle = (
-            "synchronous reference; native Griebel local SA is shown separately"
+            "synchronous source set: all configured sensor SA opinions"
         )
     else:
         comparison_subtitle = (
-            f"asynchronous decision-level extension = {GRIEBEL_ASYNC_EXTENSION_MODE!r}; "
-            "not claimed as the published synchronous multi-source method"
+            f"Griebel asynchronous source selection = "
+            f"{GRIEBEL_ASYNC_EXTENSION_MODE!r}; "
+            "explicit extension of the synchronous multi-source setting"
         )
 
     fig.suptitle(
-        "Reference comparison\n" + comparison_subtitle
+        "Evaluation B — overall consistency assessment\n"
+        r"Griebel native ABF vs proposed $\omega_B$ and $\omega_C$"
+        "\n"
+        + comparison_subtitle
     )
     fig.tight_layout()
 
     # ------------------------------------------------------------------
-    # Native Griebel local outputs: these are the actual values returned by
-    # KalmanSelfAssessor and therefore the primary Griebel comparison available
-    # through the current API.
+    # Native Griebel local outputs retained for the source-isolation /
+    # cross-contamination evaluation (Evaluation A).  Figure 5 above uses the
+    # validated pre-threshold native opinions for the overall ABF comparison.
     # ------------------------------------------------------------------
     if result.griebel.native:
         fig, axes = plt.subplots(
@@ -3859,27 +4667,34 @@ def print_summary(result: ProcessingResult) -> None:
     print("\nGriebel reference/comparison")
     print(f"  backend: {result.griebel.status}")
     print(f"  async extension mode: {GRIEBEL_ASYNC_EXTENSION_MODE}")
-    print("  primary native comparison: per-sensor delta / uncertainty / eta")
     print(
-        "  native multi-source source opinions are not exposed by the current "
-        "get_sas_measures() interface -> no pseudo-ABF is reconstructed"
+        "  Evaluation B: native pre-threshold Griebel opinions -> ABF -> "
+        "DC/uncertainty vs proposed omega_B and omega_C"
     )
-    if result.griebel.native and GRIEBEL_PLOT_CONSTRUCTED_DECISION_PP:
+    if result.griebel.native:
         print(
-            "  constructed threshold-decision PP samples: "
-            f"{len(result.griebel.overall_p_ok)}"
+            f"  native Griebel ABF samples: "
+            f"{len(result.griebel.abf_delta)}"
         )
-        if result.griebel.overall_source_count:
+        if result.griebel.abf_source_count:
             print(
-                "  constructed decision source-count range: "
-                f"{min(result.griebel.overall_source_count)}.."
-                f"{max(result.griebel.overall_source_count)}"
+                "  ABF source-count range: "
+                f"{min(result.griebel.abf_source_count)}.."
+                f"{max(result.griebel.abf_source_count)}"
             )
-        if result.griebel.overall_max_source_age_s:
+        if result.griebel.abf_max_source_age_s:
             print(
-                "  max source age in constructed decision summary: "
-                f"{max(result.griebel.overall_max_source_age_s):.3f} s"
+                "  max Griebel source age used by ABF: "
+                f"{max(result.griebel.abf_max_source_age_s):.3f} s"
             )
+        for sensor_id in result.griebel.sensor_ids:
+            path = result.griebel.native_opinion_path[sensor_id]
+            reference_path = result.griebel.native_reference_path[sensor_id]
+            if path is not None:
+                print(
+                    f"  S{sensor_id} native opinion: {path}; "
+                    f"reference: {reference_path}"
+                )
 
     # The key cross-contamination diagnostic is nominal Sensor-2 d_norm
     # during Sensor-1-only disturbance intervals.
