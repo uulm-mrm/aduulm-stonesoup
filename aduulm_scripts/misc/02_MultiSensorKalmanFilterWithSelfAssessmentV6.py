@@ -195,6 +195,10 @@ SHOW_MATPLOTLIB_PLOTS = True
 SHOW_POSITION_ERROR = True
 SHOW_PAIRWISE_TIME_SERIES = NUM_SENSORS <= 4
 SHOW_PAIRWISE_MATRIX_FIGURE = True
+# Dedicated per-pair trajectory figure: one subplot for every unique i<j pair,
+# showing d_norm(G_ij) together with d_norm(omega_C,ij).
+SHOW_PAIRWISE_DEDUCTION_TRAJECTORIES = True
+PAIR_TRAJECTORY_MAX_COLUMNS = 3
 # None -> automatically use the midpoint of the Sensor-1 bias interval.
 PAIR_MATRIX_SNAPSHOT_TIME_S = None
 
@@ -2827,28 +2831,131 @@ def plot_static_results(result: ProcessingResult) -> None:
             (axes[0], agreement_values, r"Agreement matrix: $d_{\mathrm{norm}}(G_{ij})$"),
             (axes[1], deduction_values, r"Pair-conditioned matrix: $d_{\mathrm{norm}}(\omega_{C,ij})$"),
         ):
-            image = axis.imshow(np.ma.masked_invalid(values), vmin=0.0, vmax=1.0, cmap="magma")
+            # Semantic traffic-light scale: green = nominal/consistent (0),
+            # yellow = intermediate, red = strong disagreement/inconsistency (1).
+            image = axis.imshow(
+                np.ma.masked_invalid(values),
+                vmin=0.0,
+                vmax=1.0,
+                cmap="RdYlGn_r",
+            )
             axis.set_xticks(np.arange(n), [f"S{s}" for s in sensor_ids])
             axis.set_yticks(np.arange(n), [f"S{s}" for s in sensor_ids])
             axis.set_title(title)
             for row in range(n):
                 for col in range(row + 1, n):
                     value = values[row, col]
+                    if np.isfinite(value):
+                        # Select black/white annotation text from the actual cell
+                        # luminance so the value remains readable on green/yellow/red.
+                        rgba = image.cmap(image.norm(float(value)))
+                        luminance = (
+                            0.2126 * rgba[0]
+                            + 0.7152 * rgba[1]
+                            + 0.0722 * rgba[2]
+                        )
+                        text_colour = "black" if luminance > 0.55 else "white"
+                        annotation = f"{value:.2f}"
+                    else:
+                        text_colour = "0.35"
+                        annotation = "--"
                     axis.text(
-                        col, row,
-                        "--" if not np.isfinite(value) else f"{value:.2f}",
-                        ha="center", va="center",
-                        color="white" if np.isfinite(value) and value > 0.45 else "black",
-                        fontsize=9,
+                        col,
+                        row,
+                        annotation,
+                        ha="center",
+                        va="center",
+                        color=text_colour,
+                        fontsize=13,
+                        fontweight="bold",
                     )
             # Explicitly mark diagonal/lower triangle as redundant/not evaluated.
             for row in range(n):
                 for col in range(0, row + 1):
-                    axis.text(col, row, "·", ha="center", va="center", color="0.65", fontsize=10)
-            fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+                    axis.text(
+                        col, row, "·",
+                        ha="center", va="center",
+                        color="0.60", fontsize=12,
+                    )
+            colorbar = fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
+            colorbar.set_label(
+                r"$d_{\mathrm{norm}}$: 0 = nominal / agreement, 1 = inconsistency / disagreement"
+            )
         fig.suptitle(
             f"N-sensor pairwise diagnostic matrices at t={actual_snapshot_time:.1f} s\n"
             "Only the upper triangle contains unique sensor pairs"
+        )
+        fig.tight_layout()
+
+    # ------------------------------------------------------------------
+    # Dedicated per-pair trajectories: each unique upper-triangular matrix
+    # entry gets its own subplot. This directly shows how G_ij drives the
+    # corresponding pair-conditioned opinion omega_C,ij over time.
+    # ------------------------------------------------------------------
+    if result.disagreement_states and SHOW_PAIRWISE_DEDUCTION_TRAJECTORIES:
+        pairs = sorted(result.disagreement_states)
+        n_pairs = len(pairs)
+        n_cols = max(1, min(PAIR_TRAJECTORY_MAX_COLUMNS, n_pairs))
+        n_rows = int(np.ceil(n_pairs / n_cols))
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(5.2 * n_cols, 3.5 * n_rows),
+            sharex=True,
+            sharey=True,
+            squeeze=False,
+        )
+
+        for pair_index, pair in enumerate(pairs):
+            row = pair_index // n_cols
+            col = pair_index % n_cols
+            axis = axes[row, col]
+            i, j = pair
+            pair_state = result.disagreement_states[pair]
+
+            pair_d_norm = normalized_disbelief_series(
+                pair_state.disbelief_events,
+                pair_state.uncertainty_events,
+            )
+            deduction_d_norm = [
+                normalized_disbelief(opinion)
+                for opinion in result.pair_conditioned_history[pair]
+            ]
+
+            axis.plot(
+                pair_state.event_times_s,
+                pair_d_norm,
+                color="tab:orange",
+                linewidth=1.45,
+                label=rf"$G_{{{i}{j}}}$: $d_{{\mathrm{{norm}}}}$",
+            )
+            axis.plot(
+                event_times,
+                deduction_d_norm,
+                color="tab:blue",
+                linewidth=1.65,
+                label=rf"$\omega_{{C,{i}{j}}}$: $d_{{\mathrm{{norm}}}}$",
+            )
+            axis.set_title(rf"Sensor pair $S_{i}$--$S_{j}$")
+            axis.set_ylim(-0.02, 1.02)
+            axis.grid(True)
+            add_disturbance_spans(axis)
+            axis.legend(loc="upper right", fontsize=8)
+
+            if col == 0:
+                axis.set_ylabel(r"$d_{\mathrm{norm}}$")
+            if row == n_rows - 1:
+                axis.set_xlabel("time [s]")
+
+        # Hide unused grid cells when the pair count is not a multiple of n_cols.
+        for pair_index in range(n_pairs, n_rows * n_cols):
+            row = pair_index // n_cols
+            col = pair_index % n_cols
+            axes[row, col].axis("off")
+
+        fig.suptitle(
+            "Individual pairwise agreement and pair-conditioned consistency trajectories\n"
+            r"$\omega_{C,ij}=\mathrm{Deduction}(G_{ij};\omega_B,\omega_{\mathrm{strict}})$, $i<j$"
         )
         fig.tight_layout()
 
