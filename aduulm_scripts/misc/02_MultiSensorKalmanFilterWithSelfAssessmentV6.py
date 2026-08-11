@@ -154,18 +154,18 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 # Number of configured measurement sensors.  The complete SA architecture below
 # is generated dynamically for this number of sensors.  N=2 reproduces the old
 # pairwise special case; N>=3 additionally yields an agreement/deduction matrix.
-NUM_SENSORS = 3
+NUM_SENSORS = 4
 if NUM_SENSORS < 1:
     raise ValueError("NUM_SENSORS must be >= 1")
 
 # False: asynchronous/multi-rate case.
 # True: all configured sensors are sampled synchronously on the reference grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
 SYNCHRONOUS_REFERENCE_RATE_HZ = 10.0
 
 # In the generic asynchronous case the rates are assigned cyclically from this
 # pattern.  Every rate must be exactly representable on TRUTH_RATE_HZ below.
-ASYNC_SENSOR_RATE_PATTERN_HZ = (10.0, 12.5, 20.0, 25.0)
+ASYNC_SENSOR_RATE_PATTERN_HZ = (5.0, 10.0, 12.5, 20.0)
 # Optional explicit rates in asynchronous mode, e.g. {1: 10.0, 2: 20.0, 3: 25.0}.
 SENSOR_RATE_OVERRIDES_HZ: dict[int, float] = {}
 
@@ -180,7 +180,7 @@ CROSS_CONTAMINATION_OTHER_RATE_HZ = 10.0
 # Disturbance assignment.  The existing measurement disturbances (outliers,
 # bias, R mismatch, non-Gaussian noise) are applied to every sensor ID contained
 # here.  The default keeps the previous Sensor-1-only experiment.
-DISTURBED_SENSOR_IDS = {1}
+DISTURBED_SENSOR_IDS = {2}
 
 # Availability/dropout is a separate proposition.  The selected sensor is
 # removed only during SENSOR_DROPOUT_INTERVAL_S; all consistency channels freeze
@@ -190,7 +190,7 @@ DROPOUT_SENSOR_ID = 2
 
 # Static plots are fully N-sensor aware.  The legacy dynamic animation remains a
 # compact two-sensor dashboard and is therefore skipped automatically for N>2.
-SHOW_DYNAMIC_ANIMATION = False
+SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
 SHOW_POSITION_ERROR = True
 SHOW_PAIRWISE_TIME_SERIES = NUM_SENSORS <= 4
@@ -390,7 +390,7 @@ INCREASED_MEAS_XY_INTERVAL_S = (50.0, 60.0)
 # multiply the TRUE measurement-noise covariance by 4. This doubles the
 # per-component standard deviation while the filter continues assuming the
 # nominal covariance.
-MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR = 4.0
+MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR = 2.0
 
 # Explicit 10 s nominal gap before and after the dropout:
 #   previous disturbance ends at 60 s,
