@@ -160,7 +160,7 @@ if NUM_SENSORS < 1:
 
 # False: asynchronous/multi-rate case.
 # True: all configured sensors are sampled synchronously on the reference grid.
-SYNCHRONOUS_SENSOR_SPECIAL_CASE = False
+SYNCHRONOUS_SENSOR_SPECIAL_CASE = True
 SYNCHRONOUS_REFERENCE_RATE_HZ = 10.0
 
 # In the generic asynchronous case the rates are assigned cyclically from this
@@ -188,8 +188,8 @@ DISTURBED_SENSOR_IDS = {2}
 ENABLE_SENSOR_DROPOUT = True
 DROPOUT_SENSOR_ID = 2
 
-# Static plots are fully N-sensor aware.  The legacy dynamic animation remains a
-# compact two-sensor dashboard and is therefore skipped automatically for N>2.
+# Static plots are fully N-sensor aware. The dynamic Plotly dashboard is generated
+# for up to four sensors; for N>4 it is skipped to keep the dashboard readable.
 SHOW_DYNAMIC_ANIMATION = True
 SHOW_MATPLOTLIB_PLOTS = True
 SHOW_POSITION_ERROR = True
@@ -3275,29 +3275,49 @@ def _configure_ternary_axes(fig) -> None:
 
 
 def _active_disturbance_labels(elapsed_s: float) -> list[str]:
+    """Return active disturbance labels for the dynamically configured sensors."""
     labels: list[str] = []
 
-    if ACTIVATE_DISTURBANCES and DISTURB_SENSOR_1:
-        for start_s, end_s, label, _ in DISTURBANCE_INTERVALS:
-            if label.startswith("S1 ") and start_s <= elapsed_s < end_s:
-                labels.append(label)
-
-    if ACTIVATE_DISTURBANCES and DISTURB_SENSOR_2:
-        for start_s, end_s, label, _ in DISTURBANCE_INTERVALS:
+    if ACTIVATE_DISTURBANCES:
+        for sensor_id in sorted(DISTURBED_SENSOR_IDS):
+            if not 1 <= int(sensor_id) <= NUM_SENSORS:
+                continue
+            prefix = f"S{sensor_id}"
+            if OUTLIER_INTERVAL_S[0] <= elapsed_s < OUTLIER_INTERVAL_S[1]:
+                labels.append(f"{prefix} outliers")
+            if SENSOR_1_BIAS_INTERVAL_S[0] <= elapsed_s < SENSOR_1_BIAS_INTERVAL_S[1]:
+                labels.append(
+                    f"{prefix} + {int(SENSOR_1_BIAS_VECTOR_M[0])}m x-bias"
+                )
             if (
-                label.startswith("S2 ")
-                and "unavailable" not in label
-                and start_s <= elapsed_s < end_s
+                INCREASED_MEAS_XY_INTERVAL_S[0]
+                <= elapsed_s
+                < INCREASED_MEAS_XY_INTERVAL_S[1]
             ):
-                labels.append(label)
+                labels.append(
+                    f"{prefix} increased x/y-noise "
+                    f"(R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})"
+                )
+            if (
+                VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S[0]
+                <= elapsed_s
+                < VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S[1]
+            ):
+                distribution_label = (
+                    "variance-matched heavy-tailed mixture"
+                    if USE_HEAVY_TAILED_NON_GAUSSIAN
+                    else "variance-matched bimodal mixture"
+                )
+                labels.append(f"{prefix} {distribution_label}")
 
     if (
-        ENABLE_SENSOR_2_DROPOUT
+        ENABLE_SENSOR_DROPOUT
+        and 1 <= DROPOUT_SENSOR_ID <= NUM_SENSORS
         and SENSOR_DROPOUT_INTERVAL_S[0]
         <= elapsed_s
         < SENSOR_DROPOUT_INTERVAL_S[1]
     ):
-        labels.append("S2 unavailable")
+        labels.append(f"S{DROPOUT_SENSOR_ID} unavailable")
 
     if (
         ENABLE_GROUND_TRUTH_TURN
@@ -3381,13 +3401,45 @@ def show_dynamic_animation(
     scenario: ScenarioData,
     result: ProcessingResult,
 ) -> None:
-    """V7-style Plotly dashboard with follow-view and SL opinion triangles."""
+    """Dynamic Plotly dashboard for one to four configured sensors.
+
+    The left half keeps the V7 follow-view.  The right half is generated
+    dynamically: one consistency triangle per sensor plus shared triangles for
+    availability, aggregated availability, all unique G_ij pair opinions,
+    central-batch consistency, overall omega_C, and the final omega_T/omega_H
+    opinions.  For N>4 the caller skips this dashboard to avoid excessive
+    visual density.
+    """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+
+    if NUM_SENSORS > 4:
+        print(
+            f"Dynamic animation skipped: N={NUM_SENSORS} > 4. "
+            "Static N-sensor figures remain available."
+        )
+        return
 
     if len(result.track) == 0 or len(result.event_timestamps) == 0:
         print("Dynamic animation skipped: no track/event data.")
         return
+
+    sensor_ids = sorted(result.isolated_states)
+    sensor_colours = {
+        sensor_id: colour
+        for sensor_id, colour in zip(
+            sensor_ids,
+            ("royalblue", "darkorange", "seagreen", "mediumpurple"),
+        )
+    }
+    pair_palette = (
+        "deepskyblue",
+        "goldenrod",
+        "limegreen",
+        "hotpink",
+        "sienna",
+        "teal",
+    )
 
     all_steps = list(range(len(result.event_timestamps)))
     requested_stride = max(1, int(ANIMATION_FRAME_STRIDE))
@@ -3403,7 +3455,7 @@ def show_dynamic_animation(
     print(
         "Animation frames: "
         f"{len(frame_steps)} / {len(all_steps)} union-event steps "
-        f"(effective stride={stride})"
+        f"(effective stride={stride}; N={NUM_SENSORS})"
     )
 
     truth_by_timestamp = {state.timestamp: state for state in scenario.truth}
@@ -3422,95 +3474,149 @@ def show_dynamic_animation(
 
     def opinion_panels(step: int):
         elapsed_s = float(result.event_times_s[step])
+        panels = []
+        titles = []
 
-        c1_iso = _state_triplet_at_time(result.isolated_states[1], elapsed_s)
-        c1_common = _state_triplet_at_time(
-            result.common_prediction_states[1], elapsed_s
-        )
-        c2_iso = _state_triplet_at_time(result.isolated_states[2], elapsed_s)
-        c2_common = _state_triplet_at_time(
-            result.common_prediction_states[2], elapsed_s
-        )
-        a1 = _state_triplet_at_time(result.availability_states[1], elapsed_s)
-        a2 = _state_triplet_at_time(result.availability_states[2], elapsed_s)
+        # One sensor-specific consistency panel per configured sensor.
+        for sensor_id in sensor_ids:
+            c_iso = _state_triplet_at_time(
+                result.isolated_states[sensor_id], elapsed_s
+            )
+            c_common = _state_triplet_at_time(
+                result.common_prediction_states[sensor_id], elapsed_s
+            )
+            panels.append(
+                [
+                    (
+                        f"C{sensor_id} isolated",
+                        c_iso,
+                        sensor_colours[sensor_id],
+                    ),
+                    (f"C{sensor_id} common", c_common, "gray"),
+                ]
+            )
+            titles.append(f"Sensor {sensor_id} consistency")
 
-        c_f = history_triplet(result.batch_history, step)
+        availability_entries = []
+        for sensor_id in sensor_ids:
+            availability_entries.append(
+                (
+                    f"A{sensor_id}",
+                    _state_triplet_at_time(
+                        result.availability_states[sensor_id], elapsed_s
+                    ),
+                    sensor_colours[sensor_id],
+                )
+            )
+        panels.append(availability_entries)
+        titles.append("Sensor availability")
+
         combined_availability = history_triplet(
             result.combined_availability_history, step
         )
+        panels.append(
+            [("omega_A ABF", combined_availability, "darkorange")]
+        )
+        titles.append("Availability (ABF)")
+
+        pair_entries = []
+        for pair_index, (pair, state) in enumerate(
+            sorted(result.disagreement_states.items())
+        ):
+            i, j = pair
+            pair_entries.append(
+                (
+                    f"G{i}{j}",
+                    _state_triplet_at_time(state, elapsed_s),
+                    pair_palette[pair_index % len(pair_palette)],
+                )
+            )
+        if not pair_entries:
+            pair_entries = [
+                ("No sensor pair", _vacuous_triplet(), "lightgray")
+            ]
+        panels.append(pair_entries)
+        titles.append("Pairwise sensor agreement")
+
+        c_f = history_triplet(result.batch_history, step)
+        panels.append([("C_F", c_f, "purple")])
+        titles.append("Central track-filter")
+
         track_consistency = history_triplet(
             result.track_consistency_history, step
         )
+        panels.append(
+            [("omega_C overall consistency", track_consistency, "green")]
+        )
+        titles.append("Pair-conditioned track")
+
         track_trust = history_triplet(
             result.track_output_trust_history, step
         )
         system_health = history_triplet(
             result.system_health_history, step
         )
-        pair_agreement = (
-            _state_triplet_at_time(next(iter(result.disagreement_states.values()), None), elapsed_s)
-            if next(iter(result.disagreement_states.values()), None) is not None
-            else _vacuous_triplet()
+        panels.append(
+            [
+                ("omega_T final track trust", track_trust, "red"),
+                ("omega_H system health", system_health, "magenta"),
+            ]
         )
+        titles.append("Final opinions")
 
-        return [
-            [
-                ("C1 isolated", c1_iso, "royalblue"),
-                ("C1 common", c1_common, "gray"),
-            ],
-            [
-                ("C2 isolated", c2_iso, "darkorange"),
-                ("C2 common", c2_common, "gray"),
-            ],
-            [("A1", a1, "royalblue"), ("A2", a2, "darkorange")],
-            [("A12 ABF", combined_availability, "darkorange")],
-            [("G12 inter-sensor agreement", pair_agreement, "cyan")],
-            [("C_F", c_f, "purple")],
-            [("ω_C pair-conditioned consistency", track_consistency, "green")],
-            [
-                ("ω_T final track trust", track_trust, "red"),
-                ("ω_H system health", system_health, "magenta")
-            ],
-            # [("ω_H system health", system_health, "magenta")],
+        return panels, titles
+
+    initial_step = frame_steps[0]
+    initial_panels, panel_titles = opinion_panels(initial_step)
+    n_panel_rows = int(ceil(len(initial_panels) / 2.0))
+
+    # Track view occupies the complete left half. The right half contains up to
+    # two dynamically generated ternary plots per row.
+    specs = []
+    for row_index in range(n_panel_rows):
+        if row_index == 0:
+            left_specs = [
+                {"type": "xy", "rowspan": n_panel_rows, "colspan": 2},
+                None,
+            ]
+        else:
+            left_specs = [None, None]
+
+        panel_index_left = 2 * row_index
+        panel_index_right = panel_index_left + 1
+        right_specs = [
+            {"type": "ternary"}
+            if panel_index_left < len(initial_panels)
+            else None,
+            {"type": "ternary"}
+            if panel_index_right < len(initial_panels)
+            else None,
         ]
+        specs.append(left_specs + right_specs)
 
     fig = make_subplots(
-        rows=4,
+        rows=n_panel_rows,
         cols=4,
-        specs=[
-            [{"type": "xy", "rowspan": 4, "colspan": 2}, None, {"type": "ternary"}, {"type": "ternary"}],
-            [None, None, {"type": "ternary"}, {"type": "ternary"}],
-            [None, None, {"type": "ternary"}, {"type": "ternary"}],
-            [None, None, {"type": "ternary"}, {"type": "ternary"}],
-            # [None, None, {"type": "ternary"}, None],
-        ],
-        subplot_titles=[
-            "Track follow view",
-            "Sensor 1 consistency",
-            "Sensor 2 consistency",
-            "Sensor availability",
-            "Availability (ABF)",
-            "Inter-sensor agreement",
-            "Central track-filter",
-            "Pair-conditioned track",
-            "Final opinions",
-            # "System health",
-        ],
+        specs=specs,
+        subplot_titles=["Track follow view"] + panel_titles,
         horizontal_spacing=0.04,
         vertical_spacing=0.05,
     )
 
-    # V7 shifts opinion titles in paper coordinates to the left and down.
+    # Keep the established V7 title positioning, but make the offset slightly
+    # smaller for five-row layouts used by N=3/4.
+    opinion_title_x_shift = 0.10 if n_panel_rows <= 4 else 0.085
+    opinion_title_y_shift = 0.045 if n_panel_rows <= 4 else 0.035
     for annotation in fig.layout.annotations:
         if annotation.text == "Track follow view":
             annotation.update(font=dict(size=15))
         else:
             annotation.update(
-                x=annotation.x - 0.12,
-                y=annotation.y - 0.05,
+                x=annotation.x - opinion_title_x_shift,
+                y=annotation.y - opinion_title_y_shift,
                 xanchor="left",
                 align="left",
-                font=dict(size=14),
+                font=dict(size=13 if n_panel_rows >= 5 else 14),
             )
 
     final_step = len(result.event_timestamps) - 1
@@ -3609,7 +3715,7 @@ def show_dynamic_animation(
 
         ellipse_x, ellipse_y = _covariance_ellipse_relative(current_state)
 
-        return [
+        traces = [
             go.Scattergl(
                 x=truth_rel[:, 0] if len(truth_rel) else [],
                 y=truth_rel[:, 1] if len(truth_rel) else [],
@@ -3624,51 +3730,57 @@ def show_dynamic_animation(
                 line=dict(color="crimson", width=2.5),
                 name="Central track",
             ),
-            go.Scattergl(
-                x=measurement_xy[1][:, 0] if len(measurement_xy[1]) else [],
-                y=measurement_xy[1][:, 1] if len(measurement_xy[1]) else [],
-                mode="markers",
-                marker=dict(size=5, color="royalblue", opacity=0.6),
-                name="Sensor 1 measurements",
-            ),
-            go.Scattergl(
-                x=measurement_xy[2][:, 0] if len(measurement_xy[2]) else [],
-                y=measurement_xy[2][:, 1] if len(measurement_xy[2]) else [],
-                mode="markers",
-                marker=dict(size=5, color="darkorange", opacity=0.6),
-                name="Sensor 2 measurements",
-            ),
-            go.Scatter(
-                x=ellipse_x,
-                y=ellipse_y,
-                mode="lines",
-                line=dict(color="crimson", width=1.5, dash="dot"),
-                name="Track uncertainty ellipse",
-            ),
-            go.Scattergl(
-                x=[0.0],
-                y=[0.0],
-                mode="markers",
-                marker=dict(size=8, color="crimson", symbol="x"),
-                name="Current track",
-            ),
         ]
 
-    initial_step = frame_steps[0]
+        for sensor_id in sensor_ids:
+            points = measurement_xy.get(sensor_id, np.empty((0, 2), dtype=float))
+            traces.append(
+                go.Scattergl(
+                    x=points[:, 0] if len(points) else [],
+                    y=points[:, 1] if len(points) else [],
+                    mode="markers",
+                    marker=dict(
+                        size=5,
+                        color=sensor_colours[sensor_id],
+                        opacity=0.6,
+                    ),
+                    name=f"Sensor {sensor_id} measurements",
+                )
+            )
+
+        traces.extend(
+            [
+                go.Scatter(
+                    x=ellipse_x,
+                    y=ellipse_y,
+                    mode="lines",
+                    line=dict(color="crimson", width=1.5, dash="dot"),
+                    name="Track uncertainty ellipse",
+                ),
+                go.Scattergl(
+                    x=[0.0],
+                    y=[0.0],
+                    mode="markers",
+                    marker=dict(size=8, color="crimson", symbol="x"),
+                    name="Current track",
+                ),
+            ]
+        )
+        return traces
+
     dynamic_indices = []
 
     for trace in tracking_traces(initial_step):
         fig.add_trace(trace, row=1, col=1)
         dynamic_indices.append(len(fig.data) - 1)
 
-    ternary_positions = [
-        (1, 3), (1, 4),
-        (2, 3), (2, 4),
-        (3, 3), (3, 4),
-        (4, 3), (4, 4),
-        # (5, 3),
-    ]
-    for entries, (row, col) in zip(opinion_panels(initial_step), ternary_positions):
+    ternary_positions = []
+    for panel_index in range(len(initial_panels)):
+        row = panel_index // 2 + 1
+        col = 3 + panel_index % 2
+        ternary_positions.append((row, col))
+
+    for entries, (row, col) in zip(initial_panels, ternary_positions):
         fig.add_trace(_ternary_marker_trace(go, entries), row=row, col=col)
         dynamic_indices.append(len(fig.data) - 1)
 
@@ -3699,19 +3811,25 @@ def show_dynamic_animation(
         rate_mode = "asynchronous multi-rate"
 
     model_label = "CT/UKF" if USE_CT_MODEL else "CV/KF"
+    rate_text = ", ".join(
+        f"S{sensor_id}={configured_sensor_rate_hz(sensor_id):g} Hz"
+        for sensor_id in sensor_ids
+    )
     static_annotations = [
         annotation.to_plotly_json()
         for annotation in (fig.layout.annotations or [])
     ]
 
+    # Increase the dashboard height for the fifth opinion row used at N=3/4.
+    dashboard_height = 1120 if n_panel_rows <= 4 else 1320
     fig.update_layout(
         title=(
             "Dynamic event-based multi-sensor self-assessment — track trust and system health"
-            f"<br><sup>{rate_mode}; S1={SENSOR_1_RATE_HZ:g} Hz, "
-            f"S2={SENSOR_2_RATE_HZ:g} Hz; filter={model_label}</sup>"
+            f"<br><sup>{rate_mode}; N={NUM_SENSORS}; {rate_text}; "
+            f"filter={model_label}</sup>"
         ),
         width=1750,
-        height=1120,
+        height=dashboard_height,
         margin=dict(t=120, b=95, l=60, r=30),
         annotations=static_annotations + [
             _disturbance_annotation(
@@ -3719,8 +3837,6 @@ def show_dynamic_animation(
                 float(result.event_times_s[initial_step]),
             )
         ],
-        # The only global legend belongs to the tracking panel. Place it inside
-        # that panel so it cannot collide with the x-axis label or slider.
         legend=dict(
             orientation="v",
             x=0.012,
@@ -3737,7 +3853,8 @@ def show_dynamic_animation(
     frames = []
     for step in frame_steps:
         frame_data = tracking_traces(step)
-        for entries in opinion_panels(step):
+        panels, _ = opinion_panels(step)
+        for entries in panels:
             frame_data.append(_ternary_marker_trace(go, entries))
 
         frame_x_range, frame_y_range = _tracking_axis_ranges(step)
@@ -3981,11 +4098,11 @@ def main() -> None:
     print_summary(result)
 
     if SHOW_DYNAMIC_ANIMATION:
-        if NUM_SENSORS <= 2:
+        if NUM_SENSORS <= 4:
             show_dynamic_animation(scenario, result)
         else:
             print(
-                "Dynamic Plotly animation skipped for N>2; the static N-sensor "
+                "Dynamic Plotly animation skipped for N>4; the static N-sensor "
                 "agreement/deduction matrix figures remain available."
             )
     if SHOW_MATPLOTLIB_PLOTS:
