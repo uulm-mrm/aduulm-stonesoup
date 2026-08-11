@@ -196,9 +196,16 @@ SHOW_POSITION_ERROR = True
 SHOW_PAIRWISE_TIME_SERIES = NUM_SENSORS <= 4
 SHOW_PAIRWISE_MATRIX_FIGURE = True
 # Dedicated per-pair trajectory figure: one subplot for every unique i<j pair,
-# showing d_norm(G_ij) together with d_norm(omega_C,ij).
+# showing the selected normalized score of G_ij and omega_C,ij.
 SHOW_PAIRWISE_DEDUCTION_TRAJECTORIES = True
 PAIR_TRAJECTORY_MAX_COLUMNS = 3
+
+# Normalized committed-mass score used in all plots/diagnostic summaries.
+# False -> d_norm = d/(1-u): high values mean inconsistency/disagreement.
+# True  -> b_norm = b/(1-u): high values mean consistency/agreement.
+# For every non-vacuous binomial opinion, b_norm = 1 - d_norm exactly.
+USE_NORMALIZED_BELIEF = True
+
 # None -> automatically use the midpoint of the Sensor-1 bias interval.
 PAIR_MATRIX_SNAPSHOT_TIME_S = None
 
@@ -827,8 +834,7 @@ def normalized_disbelief_from_components(
     """Return d_norm = d / (1-u), i.e. inconsistency within committed mass.
 
     For a vacuous opinion (u ~= 1), d_norm is undefined because no committed
-    evidence exists.  NaN is returned deliberately so plots do not suggest
-    nominal consistency merely because evidence is absent.
+    evidence exists. NaN is returned deliberately.
     """
     committed_mass = 1.0 - float(uncertainty_value)
     if committed_mass <= eps:
@@ -836,9 +842,33 @@ def normalized_disbelief_from_components(
     return float(np.clip(float(disbelief_value) / committed_mass, 0.0, 1.0))
 
 
+def normalized_belief_from_components(
+    belief_value: float,
+    uncertainty_value: float,
+    eps: float = 1e-12,
+) -> float:
+    """Return b_norm = b / (1-u), i.e. consistency within committed mass.
+
+    For a vacuous opinion (u ~= 1), b_norm is undefined because no committed
+    evidence exists. For a valid non-vacuous binomial opinion,
+
+        b_norm + d_norm = 1.
+    """
+    committed_mass = 1.0 - float(uncertainty_value)
+    if committed_mass <= eps:
+        return float("nan")
+    return float(np.clip(float(belief_value) / committed_mass, 0.0, 1.0))
+
+
 def normalized_disbelief(opinion) -> float:
     return normalized_disbelief_from_components(
         disbelief(opinion), uncertainty(opinion)
+    )
+
+
+def normalized_belief(opinion) -> float:
+    return normalized_belief_from_components(
+        belief(opinion), uncertainty(opinion)
     )
 
 
@@ -850,6 +880,51 @@ def normalized_disbelief_series(
         normalized_disbelief_from_components(d, u)
         for d, u in zip(disbelief_values, uncertainty_values)
     ]
+
+
+def normalized_belief_series(
+    belief_values: Iterable[float],
+    uncertainty_values: Iterable[float],
+) -> list[float]:
+    return [
+        normalized_belief_from_components(b, u)
+        for b, u in zip(belief_values, uncertainty_values)
+    ]
+
+
+def normalized_score(opinion) -> float:
+    """Return the normalized score selected by USE_NORMALIZED_BELIEF."""
+    return normalized_belief(opinion) if USE_NORMALIZED_BELIEF else normalized_disbelief(opinion)
+
+
+def normalized_score_series(
+    belief_values: Iterable[float],
+    disbelief_values: Iterable[float],
+    uncertainty_values: Iterable[float],
+) -> list[float]:
+    """Return b_norm or d_norm for a stored binomial-opinion time series."""
+    if USE_NORMALIZED_BELIEF:
+        return normalized_belief_series(belief_values, uncertainty_values)
+    return normalized_disbelief_series(disbelief_values, uncertainty_values)
+
+
+def normalized_score_symbol() -> str:
+    return "b" if USE_NORMALIZED_BELIEF else "d"
+
+
+def normalized_score_name() -> str:
+    return "normalized belief" if USE_NORMALIZED_BELIEF else "normalized disbelief"
+
+
+def normalized_score_semantics() -> str:
+    if USE_NORMALIZED_BELIEF:
+        return "0 = inconsistency / disagreement, 1 = nominal / agreement"
+    return "0 = nominal / agreement, 1 = inconsistency / disagreement"
+
+
+def normalized_score_cmap() -> str:
+    # b_norm grows from bad->good, d_norm from good->bad.
+    return "RdYlGn" if USE_NORMALIZED_BELIEF else "RdYlGn_r"
 
 
 def prior_ok(opinion) -> float:
@@ -2522,7 +2597,7 @@ def plot_opinion_pair(
 ):
     axis_d.plot(
         times,
-        [normalized_disbelief(op) for op in opinions],
+        [normalized_score(op) for op in opinions],
         label=label,
         color=colour,
         linestyle=linestyle,
@@ -2561,7 +2636,7 @@ def plot_static_results(result: ProcessingResult) -> None:
         mode = f"asynchronous multi-rate: {rate_summary}"
 
     # ------------------------------------------------------------------
-    # Figure 1: local diagnosis - primary evaluation uses d_norm + u.
+    # Figure 1: local diagnosis - selected normalized committed score + u.
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(
         3,
@@ -2576,24 +2651,24 @@ def plot_static_results(result: ProcessingResult) -> None:
 
         axes[0, col].plot(
             iso.event_times_s,
-            normalized_disbelief_series(
-                iso.disbelief_events, iso.uncertainty_events
+            normalized_score_series(
+                iso.belief_events, iso.disbelief_events, iso.uncertainty_events
             ),
             color=iso.colour,
             linewidth=1.7,
-            label=r"isolated $d_{C,\mathrm{norm}}$",
+            label=rf"isolated ${normalized_score_symbol()}_{{\mathrm{{norm}}}}(C_s)$",
         )
         axes[0, col].plot(
             common.event_times_s,
-            normalized_disbelief_series(
-                common.disbelief_events, common.uncertainty_events
+            normalized_score_series(
+                common.belief_events, common.disbelief_events, common.uncertainty_events
             ),
             color="tab:gray",
             linestyle="--",
             linewidth=1.2,
-            label=r"common-prior $d_{C,\mathrm{norm}}$",
+            label=rf"common-prior ${normalized_score_symbol()}_{{\mathrm{{norm}}}}(C_s)$",
         )
-        axes[0, col].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
+        axes[0, col].set_ylabel(normalized_score_name() + rf" ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
 
         axes[1, col].plot(
             iso.event_times_s,
@@ -2655,7 +2730,11 @@ def plot_static_results(result: ProcessingResult) -> None:
 
     fig.suptitle(
         "Sensor-specific consistency: isolated shadow KF vs common central prior\n"
-        rf"({mode}; $d_{{\mathrm{{norm}}}}=d/(1-u)$ = normalized inconsistency, $u$ = lack of evidence)"
+        + (
+            rf"({mode}; ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$ = "
+            + (r"$b/(1-u)$ = normalized consistency" if USE_NORMALIZED_BELIEF else r"$d/(1-u)$ = normalized inconsistency")
+            + r", $u$ = lack of evidence)"
+        )
     )
     fig.tight_layout()
 
@@ -2706,11 +2785,11 @@ def plot_static_results(result: ProcessingResult) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(15, 9), sharex=True)
     axes[0].plot(
         batch.event_times_s,
-        normalized_disbelief_series(
-            batch.disbelief_events, batch.uncertainty_events
+        normalized_score_series(
+            batch.belief_events, batch.disbelief_events, batch.uncertainty_events
         ),
         color="tab:purple",
-        label=r"direct batch $d_{C_F,\mathrm{norm}}$",
+        label=rf"direct batch ${normalized_score_symbol()}_{{\mathrm{{norm}}}}(C_F)$",
     )
     axes[1].plot(
         batch.event_times_s,
@@ -2740,7 +2819,7 @@ def plot_static_results(result: ProcessingResult) -> None:
     axes[2].set_ylabel("active set")
     axes[2].set_xlabel("time [s]")
 
-    axes[0].set_ylabel(r"normalized disbelief $d_{\mathrm{norm}}$")
+    axes[0].set_ylabel(normalized_score_name() + rf" ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
     axes[1].set_ylabel("uncertainty")
     for axis in axes:
         axis.grid(True)
@@ -2764,12 +2843,14 @@ def plot_static_results(result: ProcessingResult) -> None:
         for pair, pair_state in sorted(result.disagreement_states.items()):
             i, j = pair
             colour = configured_sensor_colour(i + j - 1)
-            pair_d_norm = normalized_disbelief_series(
-                pair_state.disbelief_events, pair_state.uncertainty_events
+            pair_score = normalized_score_series(
+                pair_state.belief_events,
+                pair_state.disbelief_events,
+                pair_state.uncertainty_events,
             )
             axes[0].plot(
-                pair_state.event_times_s, pair_d_norm, linewidth=1.45,
-                label=rf"$G_{{{i}{j}}}$ disagreement",
+                pair_state.event_times_s, pair_score, linewidth=1.45,
+                label=rf"$G_{{{i}{j}}}$ " + ("agreement" if USE_NORMALIZED_BELIEF else "disagreement"),
             )
             axes[1].plot(
                 pair_state.event_times_s, pair_state.uncertainty_events, linewidth=1.35,
@@ -2777,14 +2858,14 @@ def plot_static_results(result: ProcessingResult) -> None:
             )
             axes[2].plot(
                 event_times,
-                [normalized_disbelief(op) for op in result.pair_conditioned_history[pair]],
+                [normalized_score(op) for op in result.pair_conditioned_history[pair]],
                 linewidth=1.45,
-                label=rf"$d_{{\mathrm{{norm}}}}(\omega_{{C,{i}{j}}})$",
+                label=rf"${normalized_score_symbol()}_{{\mathrm{{norm}}}}(\omega_{{C,{i}{j}}})$",
             )
 
-        axes[0].set_ylabel(r"pair $d_{\mathrm{norm}}$")
+        axes[0].set_ylabel(rf"pair ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
         axes[1].set_ylabel("pair uncertainty")
-        axes[2].set_ylabel(r"deduced $d_{\mathrm{norm}}$")
+        axes[2].set_ylabel(rf"deduced ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
         axes[2].set_xlabel("time [s]")
         for axis in axes:
             axis.set_ylim(-0.02, 1.02)
@@ -2822,22 +2903,23 @@ def plot_static_results(result: ProcessingResult) -> None:
                 agreement_op = agreement_objects[row, col]
                 deduction_op = deduction_objects[row, col]
                 if agreement_op is not None:
-                    agreement_values[row, col] = normalized_disbelief(agreement_op)
+                    agreement_values[row, col] = normalized_score(agreement_op)
                 if deduction_op is not None:
-                    deduction_values[row, col] = normalized_disbelief(deduction_op)
+                    deduction_values[row, col] = normalized_score(deduction_op)
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+        score_symbol = normalized_score_symbol()
         for axis, values, title in (
-            (axes[0], agreement_values, r"Agreement matrix: $d_{\mathrm{norm}}(G_{ij})$"),
-            (axes[1], deduction_values, r"Pair-conditioned matrix: $d_{\mathrm{norm}}(\omega_{C,ij})$"),
+            (axes[0], agreement_values, rf"Agreement matrix: ${score_symbol}_{{\mathrm{{norm}}}}(G_{{ij}})$"),
+            (axes[1], deduction_values, rf"Pair-conditioned matrix: ${score_symbol}_{{\mathrm{{norm}}}}(\omega_{{C,ij}})$"),
         ):
-            # Semantic traffic-light scale: green = nominal/consistent (0),
-            # yellow = intermediate, red = strong disagreement/inconsistency (1).
+            # Semantic traffic-light scale follows the selected score:
+            # d_norm: 0 green -> 1 red; b_norm: 0 red -> 1 green.
             image = axis.imshow(
                 np.ma.masked_invalid(values),
                 vmin=0.0,
                 vmax=1.0,
-                cmap="RdYlGn_r",
+                cmap=normalized_score_cmap(),
             )
             axis.set_xticks(np.arange(n), [f"S{s}" for s in sensor_ids])
             axis.set_yticks(np.arange(n), [f"S{s}" for s in sensor_ids])
@@ -2879,7 +2961,7 @@ def plot_static_results(result: ProcessingResult) -> None:
                     )
             colorbar = fig.colorbar(image, ax=axis, fraction=0.046, pad=0.04)
             colorbar.set_label(
-                r"$d_{\mathrm{norm}}$: 0 = nominal / agreement, 1 = inconsistency / disagreement"
+                rf"${score_symbol}_{{\mathrm{{norm}}}}$: " + normalized_score_semantics()
             )
         fig.suptitle(
             f"N-sensor pairwise diagnostic matrices at t={actual_snapshot_time:.1f} s\n"
@@ -2913,28 +2995,29 @@ def plot_static_results(result: ProcessingResult) -> None:
             i, j = pair
             pair_state = result.disagreement_states[pair]
 
-            pair_d_norm = normalized_disbelief_series(
+            pair_score = normalized_score_series(
+                pair_state.belief_events,
                 pair_state.disbelief_events,
                 pair_state.uncertainty_events,
             )
-            deduction_d_norm = [
-                normalized_disbelief(opinion)
+            deduction_score = [
+                normalized_score(opinion)
                 for opinion in result.pair_conditioned_history[pair]
             ]
 
             axis.plot(
                 pair_state.event_times_s,
-                pair_d_norm,
+                pair_score,
                 color="tab:orange",
                 linewidth=1.45,
-                label=rf"$G_{{{i}{j}}}$: $d_{{\mathrm{{norm}}}}$",
+                label=rf"$G_{{{i}{j}}}$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
             )
             axis.plot(
                 event_times,
-                deduction_d_norm,
+                deduction_score,
                 color="tab:blue",
                 linewidth=1.65,
-                label=rf"$\omega_{{C,{i}{j}}}$: $d_{{\mathrm{{norm}}}}$",
+                label=rf"$\omega_{{C,{i}{j}}}$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
             )
             axis.set_title(rf"Sensor pair $S_{i}$--$S_{j}$")
             axis.set_ylim(-0.02, 1.02)
@@ -2943,7 +3026,7 @@ def plot_static_results(result: ProcessingResult) -> None:
             axis.legend(loc="upper right", fontsize=8)
 
             if col == 0:
-                axis.set_ylabel(r"$d_{\mathrm{norm}}$")
+                axis.set_ylabel(rf"${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
             if row == n_rows - 1:
                 axis.set_xlabel("time [s]")
 
@@ -3035,35 +3118,36 @@ def plot_static_results(result: ProcessingResult) -> None:
         state = result.isolated_states[sensor_id]
         axes[0].plot(
             state.event_times_s,
-            normalized_disbelief_series(
+            normalized_score_series(
+                state.belief_events,
                 state.disbelief_events,
                 state.uncertainty_events,
             ),
             color=state.colour,
             linewidth=1.35,
-            label=rf"$C_{{{sensor_id}}}^{{iso}}$: $d_{{\mathrm{{norm}}}}$",
+            label=rf"$C_{{{sensor_id}}}^{{iso}}$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
         )
 
     axes[0].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.batch_history],
+        [normalized_score(op) for op in result.batch_history],
         color="tab:purple",
         linewidth=1.15,
         alpha=0.85,
-        label=r"$C_F$: $d_{\mathrm{norm}}$",
+        label=rf"$C_F$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
     )
 
     # Higher-level consistency path and final track trust.
     axes[1].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.track_base_history],
+        [normalized_score(op) for op in result.track_base_history],
         color="tab:green",
         linewidth=1.35,
         label=r"$\omega_B=\mathrm{WBF}(C_1^{iso},\ldots,C_N^{iso},C_F)$",
     )
     axes[1].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.track_strict_history],
+        [normalized_score(op) for op in result.track_strict_history],
         color="tab:gray",
         linewidth=1.0,
         linestyle="--",
@@ -3072,25 +3156,25 @@ def plot_static_results(result: ProcessingResult) -> None:
     )
     axes[1].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.track_consistency_history],
+        [normalized_score(op) for op in result.track_consistency_history],
         color="tab:blue",
         linewidth=1.6,
         label=r"$\omega_C=\mathrm{WBF}_{i<j}(\omega_{C,ij})$",
     )
     axes[1].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.track_output_trust_history],
+        [normalized_score(op) for op in result.track_output_trust_history],
         color="tab:red",
         linewidth=1.9,
-        label=r"final track trust $\omega_T$: $d_{\mathrm{norm}}$",
+        label=rf"final track trust $\omega_T$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
     )
     axes[1].plot(
         event_times,
-        [normalized_disbelief(op) for op in result.system_health_history],
+        [normalized_score(op) for op in result.system_health_history],
         color="tab:pink",
         linewidth=1.7,
         linestyle="--",
-        label=r"system health $\omega_H=\omega_C\cdot\omega_A$: $d_{\mathrm{norm}}$",
+        label=rf"system health $\omega_H=\omega_C\cdot\omega_A$: ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$",
     )
 
     # Availability should manifest primarily as uncertainty in the final output.
@@ -3127,8 +3211,8 @@ def plot_static_results(result: ProcessingResult) -> None:
     axes[0].set_title("Consistency assessment inputs")
     axes[1].set_title("Track consistency, final track trust, and system health")
     axes[2].set_title("Availability and uncertainty propagation")
-    axes[0].set_ylabel(r"input $d_{\mathrm{norm}}$")
-    axes[1].set_ylabel(r"track / health $d_{\mathrm{norm}}$")
+    axes[0].set_ylabel(rf"input ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
+    axes[1].set_ylabel(rf"track / health ${normalized_score_symbol()}_{{\mathrm{{norm}}}}$")
     axes[2].set_ylabel("uncertainty")
     axes[2].set_xlabel("time [s]")
 
@@ -4007,17 +4091,21 @@ def print_summary(result: ProcessingResult) -> None:
         reference_sensor_id = 2
         reference_iso = result.isolated_states[reference_sensor_id]
         reference_common = result.common_prediction_states[reference_sensor_id]
-        reference_iso_d_norm = normalized_disbelief_series(
-            reference_iso.disbelief_events, reference_iso.uncertainty_events
+        reference_iso_score = normalized_score_series(
+            reference_iso.belief_events,
+            reference_iso.disbelief_events,
+            reference_iso.uncertainty_events,
         )
-        reference_common_d_norm = normalized_disbelief_series(
-            reference_common.disbelief_events, reference_common.uncertainty_events
+        reference_common_score = normalized_score_series(
+            reference_common.belief_events,
+            reference_common.disbelief_events,
+            reference_common.uncertainty_events,
         )
-        nominal_iso = nominal_mean(reference_iso.event_times_s, reference_iso_d_norm)
-        nominal_common = nominal_mean(reference_common.event_times_s, reference_common_d_norm)
+        nominal_iso = nominal_mean(reference_iso.event_times_s, reference_iso_score)
+        nominal_common = nominal_mean(reference_common.event_times_s, reference_common_score)
         print(f"\nSensor-{reference_sensor_id} cross-contamination check (Sensor 1 disturbed)")
         print(
-            f"  nominal mean d_norm: isolated={nominal_iso:.3f}, "
+            f"  nominal mean {normalized_score_symbol()}_norm: isolated={nominal_iso:.3f}, "
             f"common-prior={nominal_common:.3f}"
         )
         for interval, label in (
@@ -4026,12 +4114,12 @@ def print_summary(result: ProcessingResult) -> None:
             (INCREASED_MEAS_XY_INTERVAL_S, f"S1 increased x/y-noise (R x{MEASUREMENT_NOISE_VARIANCE_INCREASE_FACTOR:g})"),
             (VARIANCE_MATCHED_NON_GAUSSIAN_INTERVAL_S, NON_GAUSSIAN_DISTURBANCE_LABEL),
         ):
-            iso_value = interval_mean(reference_iso.event_times_s, reference_iso_d_norm, interval)
-            common_value = interval_mean(reference_common.event_times_s, reference_common_d_norm, interval)
+            iso_value = interval_mean(reference_iso.event_times_s, reference_iso_score, interval)
+            common_value = interval_mean(reference_common.event_times_s, reference_common_score, interval)
             print(
-                f"  {label}: isolated d_norm={iso_value:.3f} "
+                f"  {label}: isolated {normalized_score_symbol()}_norm={iso_value:.3f} "
                 f"(delta={iso_value - nominal_iso:+.3f}), "
-                f"common-prior d_norm={common_value:.3f} "
+                f"common-prior {normalized_score_symbol()}_norm={common_value:.3f} "
                 f"(delta={common_value - nominal_common:+.3f})"
             )
 
@@ -4052,13 +4140,19 @@ def print_summary(result: ProcessingResult) -> None:
         )
 
     print("\nInterpretation reminder")
-    print("  d_norm=d/(1-u): normalized inconsistency within committed evidence")
+    if USE_NORMALIZED_BELIEF:
+        print("  b_norm=b/(1-u): normalized consistency within committed evidence (=1-d_norm)")
+    else:
+        print("  d_norm=d/(1-u): normalized inconsistency within committed evidence (=1-b_norm)")
     print("  C_s^iso       : sensor/path consistency using only that sensor history")
     print("  C_s^common    : same PIT/TEF mapping but central common prior")
     print("  A_s           : expected output availability")
     print("  dropout       : freezes statistical consistency channels; A_s carries missingness")
     print("  C~_s=A_s(*)C_s^iso: local availability-discounted diagnostic only")
-    print("  G_ij          : upper-triangular direct pair-agreement opinions; d_norm quantifies disagreement")
+    print(
+        "  G_ij          : upper-triangular direct pair-agreement opinions; "
+        + ("b_norm quantifies agreement" if USE_NORMALIZED_BELIEF else "d_norm quantifies disagreement")
+    )
     print("  C_F           : direct consistency of the actually used central measurement batch")
     print("  omega_B       : WBF(C_1^iso,...,C_N^iso,C_F), nominal/base track consistency")
     print("  omega_strict  : AND(C_1^iso,...,C_N^iso,C_F), conditional disagreement branch")
@@ -4074,6 +4168,11 @@ def main() -> None:
     print("=" * 88)
     print("SCRIPT BUILD: V8_N_SENSOR_AGREEMENT_MATRIX_2026-08-10")
     print("SELF-ASSESSMENT PIPELINE: DYNAMIC N-SENSOR TRACK TRUST + SYSTEM HEALTH")
+    print(
+        "Normalized plot score: "
+        + ("b_norm=b/(1-u) [consistency/agreement]" if USE_NORMALIZED_BELIEF
+           else "d_norm=d/(1-u) [inconsistency/disagreement]")
+    )
     print(
         "omega_B=WBF(C1_iso,...,CN_iso,C_F); "
         "omega_C,ij=Deduction(Gij; omega_B, omega_strict); "
