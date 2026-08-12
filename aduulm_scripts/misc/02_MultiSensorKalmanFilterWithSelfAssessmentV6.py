@@ -154,7 +154,7 @@ except Exception as exc:  # noqa: BLE001 - optional research dependency
 # Number of configured measurement sensors.  The complete SA architecture below
 # is generated dynamically for this number of sensors.  N=2 reproduces the old
 # pairwise special case; N>=3 additionally yields an agreement/deduction matrix.
-NUM_SENSORS = 4
+NUM_SENSORS = 2
 if NUM_SENSORS < 1:
     raise ValueError("NUM_SENSORS must be >= 1")
 
@@ -180,7 +180,7 @@ CROSS_CONTAMINATION_OTHER_RATE_HZ = 10.0
 # Disturbance assignment.  The existing measurement disturbances (outliers,
 # bias, R mismatch, non-Gaussian noise) are applied to every sensor ID contained
 # here.  The default keeps the previous Sensor-1-only experiment.
-DISTURBED_SENSOR_IDS = {2}
+DISTURBED_SENSOR_IDS = {1}
 
 # Availability/dropout is a separate proposition.  The selected sensor is
 # removed only during SENSOR_DROPOUT_INTERVAL_S; all consistency channels freeze
